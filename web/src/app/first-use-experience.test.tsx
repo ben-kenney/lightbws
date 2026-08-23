@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react"
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -79,6 +79,20 @@ describe("first-use experience", () => {
     expect(await screen.findByRole("heading", { name: "Start with one secret" })).toBeInTheDocument()
     expect(screen.getByText(location.origin)).toBeInTheDocument()
     expect(screen.getByText("You only need the service endpoint and one secret to begin. Projects are optional.")).toBeInTheDocument()
+  })
+
+  it("turns the dashboard summary and control path into accessible navigation", async () => {
+    mocks.overview.mockResolvedValue({ projects: 2, secrets: 5, trash: 1 })
+    history.replaceState(null, "", "/#dashboard")
+    render(<Providers><App /></Providers>)
+
+    const summary = await screen.findByRole("region", { name: "Workspace resources" })
+    expect(within(summary).getByRole("button", { name: "Projects: 2" })).toBeInTheDocument()
+    expect(within(summary).getByRole("button", { name: "Active secrets: 5" })).toBeInTheDocument()
+
+    const flow = screen.getByRole("region", { name: "From storage to workload" })
+    await userEvent.click(within(flow).getByRole("button", { name: /Protect secrets/ }))
+    expect(location.hash).toBe("#secrets")
   })
 
   it("keeps the tour active while navigating between workspace pages", async () => {

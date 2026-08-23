@@ -145,15 +145,54 @@ a.integration-card:active { transform: scale(0.97); }
 .spotlight-step-info { opacity: 1; }
 body:has([data-theme="light"]) .spotlight-step-info { color: #686875 !important; }
 
-.metric-grid { display: grid; gap: 0.8rem; }
-.metric { display: flex; align-items: center; gap: 1rem; min-height: 7rem; border-block-start: 2px solid var(--signal); border-inline: 1px solid var(--line); border-block-end: 1px solid var(--line); background: var(--surface); padding: 1.1rem; }
-.metric > span { display: grid; place-items: center; width: 2.5rem; height: 2.5rem; border: 1px solid var(--line); border-radius: var(--radius-control); color: var(--signal); }
+.workspace-summary { border-block: 1px solid var(--line); background: var(--surface); }
+.dashboard-section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; padding: clamp(1rem, 2vw, 1.4rem); }
+.dashboard-section-heading h2 { margin: 0; font-size: clamp(1.05rem, 1vw + 0.75rem, 1.35rem); }
+.dashboard-section-heading p:last-child { max-width: 58ch; margin: 0.35rem 0 0; color: var(--ink-muted); font-size: 0.78rem; line-height: 1.55; text-wrap: pretty; }
+.dashboard-section-heading > svg { width: 1.25rem; color: var(--signal); }
+.workspace-status { display: inline-flex; align-items: center; gap: 0.45rem; min-height: 1.9rem; flex: 0 0 auto; border: 1px solid var(--line); border-radius: 999px; padding-inline: 0.65rem; color: var(--ink); font-family: var(--font-code); font-size: 0.63rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
+.workspace-status i { width: 0.45rem; height: 0.45rem; border-radius: 50%; background: var(--success); }
+.metric-grid { display: grid; border-block-start: 1px solid var(--line); }
+.metric { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 0.85rem; min-height: 5.5rem; border: 0; border-block-end: 1px solid var(--line); background: transparent; color: var(--ink); padding: 0.9rem 1rem; cursor: pointer; text-align: start; transition: transform var(--duration-press) var(--ease-out), background-color 150ms ease; }
+.metric-icon { display: grid; place-items: center; width: 2.5rem; height: 2.5rem; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface-muted); color: var(--signal); }
 .metric svg { width: 1.1rem; }
+.metric .metric-arrow { width: 0.9rem; color: var(--ink-muted); transition: transform 150ms var(--ease-out), color 150ms ease; }
 .metric strong,
 .metric small { display: block; }
-.metric strong { font-family: var(--font-code); font-size: 1.7rem; font-weight: 650; }
+.metric strong { font-family: var(--font-code); font-size: 1.55rem; font-weight: 650; font-variant-numeric: tabular-nums; }
 .metric small { color: var(--ink); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; }
 .dashboard-grid { display: grid; gap: 1rem; margin-block-start: 1rem; }
+.control-plane-panel { display: flex; min-height: 27rem; flex-direction: column; padding: 0; overflow: hidden; }
+.control-plane-panel .dashboard-section-heading { border-block-end: 1px solid var(--line); }
+.control-flow { display: grid; flex: 1; }
+.dashboard-path { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; align-items: center; gap: 0.8rem; min-height: 7.5rem; border: 0; border-block-end: 1px solid var(--line); background: transparent; color: var(--ink); padding: 1rem 1.2rem; cursor: pointer; text-align: start; transition: transform var(--duration-press) var(--ease-out), background-color 150ms ease; }
+.dashboard-path-index { align-self: start; color: var(--ink-muted); font-family: var(--font-code); font-size: 0.62rem; letter-spacing: 0.08em; }
+.dashboard-path-icon { display: grid; width: 2.4rem; height: 2.4rem; place-items: center; border-radius: var(--radius-control); background: var(--signal-soft); color: var(--signal); }
+.dashboard-path-icon svg { width: 1.05rem; }
+.dashboard-path-copy strong,
+.dashboard-path-copy small { display: block; }
+.dashboard-path-copy strong { font-size: 0.84rem; }
+.dashboard-path-copy small { max-width: 38ch; margin-block-start: 0.25rem; color: var(--ink-muted); font-size: 0.72rem; line-height: 1.5; text-wrap: pretty; }
+.dashboard-path > svg { width: 0.95rem; color: var(--ink-muted); transition: transform 150ms var(--ease-out), color 150ms ease; }
+.control-plane-protocol { display: block; padding: 0.9rem 1.2rem; background: var(--surface-muted); color: var(--ink-muted); font-size: 0.66rem; letter-spacing: 0.04em; }
+.dashboard-rail { display: grid; gap: 1rem; }
+.system-panel,
+.security-panel { display: flex; min-height: 0; flex-direction: column; }
+.system-panel > p,
+.security-panel > p { color: var(--ink-muted); font-size: 0.76rem; line-height: 1.55; text-wrap: pretty; }
+.system-facts,
+.security-facts { display: grid; gap: 0; margin: auto 0 0; }
+.system-facts > div,
+.security-facts > div { display: grid; grid-template-columns: minmax(5rem, 0.45fr) minmax(0, 1fr); align-items: baseline; gap: 0.75rem; border-block-start: 1px solid var(--line); padding-block: 0.7rem; }
+.system-facts dt,
+.security-facts dt { color: var(--ink-muted); font-size: 0.66rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
+.system-facts dd,
+.security-facts dd { min-width: 0; margin: 0; text-align: end; }
+.system-facts code,
+.security-facts code { font-size: 0.66rem; }
+.security-panel .panel-heading { align-items: center; }
+.security-panel .panel-heading .eyebrow { margin: 0; }
+.security-panel > h2 { margin-block-start: 1rem; }
 .getting-started { display: grid; gap: 1rem; margin-block-end: 1rem; border: 1px solid color-mix(in srgb, var(--signal) 32%, var(--line)); border-radius: var(--radius-panel); background: color-mix(in srgb, var(--signal-soft) 55%, var(--surface)); padding: clamp(1rem, 3vw, 1.5rem); }
 .getting-started-copy { display: flex; align-items: flex-start; gap: 0.8rem; }
 .getting-started-copy h2 { margin: 0; font-size: 1.05rem; }
@@ -393,6 +432,10 @@ tbody tr { transition: background-color 140ms ease; }
   .theme-option[data-selected="true"]:hover { border-color: var(--signal); background: var(--signal-soft); }
   .dialog-tabs button:hover { background: var(--surface-hover); color: var(--ink); }
   .dialog-tabs button[data-active="true"]:hover { background: var(--signal-soft); color: var(--signal); }
+  .metric:hover,
+  .dashboard-path:hover { background: var(--surface-hover); transform: translateY(-1px); }
+  .metric:hover .metric-arrow,
+  .dashboard-path:hover > svg { color: var(--signal); transform: translateX(2px); }
 }
 
 @media (min-width: 40rem) {
@@ -400,6 +443,8 @@ tbody tr { transition: background-color 140ms ease; }
   .metric-grid,
   .choice-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .metric-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .metric { border-inline-end: 1px solid var(--line); border-block-end: 0; }
+  .metric:last-child { border-inline-end: 0; }
   .skeleton-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .skeleton-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .choice-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -428,6 +473,9 @@ tbody tr { transition: background-color 140ms ease; }
   .login-intro > p:not(.eyebrow),
   .login-intro > .trust-line { display: none; }
   .login-card { padding: clamp(20px, 6vw, 28px) !important; }
+  .dashboard-section-heading { flex-direction: column; }
+  .control-plane-panel .dashboard-section-heading > svg { display: none; }
+  .workspace-status { align-self: flex-start; }
   .quick-path li { grid-template-columns: 1fr; gap: 0.25rem; }
   .help-steps li { grid-template-columns: 1fr; gap: 0.3rem; }
   .help-toc button { min-height: 44px; }
@@ -457,7 +505,9 @@ tbody tr { transition: background-color 140ms ease; }
   .mobile-bar,
   .mobile-only { display: none; }
   .main-canvas { margin-inline-start: 17rem; }
-  .dashboard-grid { grid-template-columns: minmax(0, 1.2fr) minmax(20rem, 0.8fr); }
+  .dashboard-grid { grid-template-columns: minmax(0, 1.45fr) minmax(20rem, 0.55fr); min-height: clamp(27rem, calc(100dvh - 24rem), 38rem); }
+  .control-plane-panel { min-height: 100%; }
+  .dashboard-rail { grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); }
   .page { padding: clamp(2rem, 4vw, 4rem); }
 }
 

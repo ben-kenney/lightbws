@@ -472,32 +472,87 @@ function DashboardPage({ notify, onNavigate }: { notify: (text: string, error?: 
               </ol>
             </section>
           )}
-          <section className="metric-grid">
-            <Metric icon={<FolderKanban />} label={t("projectsCount")} value={overview?.projects} />
-            <Metric icon={<KeyRound />} label={t("secretsCount")} value={overview?.secrets} />
-            <Metric icon={<Trash2 />} label={t("trashCount")} value={overview?.trash} />
-          </section>
-          <section className="dashboard-grid">
-            <article className="panel callout-panel">
-              <span className="panel-icon">
-                <ShieldCheck />
-              </span>
+          <section className="workspace-summary" aria-labelledby="workspace-summary-title">
+            <div className="dashboard-section-heading">
               <div>
+                <p className="eyebrow">WORKSPACE</p>
+                <h2 id="workspace-summary-title">{t("workspaceSummary")}</h2>
+                <p>{t("workspaceSummaryText")}</p>
+              </div>
+              <span className="workspace-status">
+                <i aria-hidden="true" />
+                {t("systemOnline")}
+              </span>
+            </div>
+            <div className="metric-grid">
+              <Metric icon={<FolderKanban />} label={t("projectsCount")} value={overview?.projects} onClick={() => onNavigate("projects")} />
+              <Metric icon={<KeyRound />} label={t("secretsCount")} value={overview?.secrets} onClick={() => onNavigate("secrets")} />
+              <Metric icon={<Trash2 />} label={t("trashCount")} value={overview?.trash} onClick={() => onNavigate("trash")} />
+            </div>
+          </section>
+          <section className="dashboard-grid" aria-label={t("controlPlaneFlow")}>
+            <article className="panel control-plane-panel">
+              <div className="dashboard-section-heading">
+                <div>
+                  <p className="eyebrow">CONTROL PLANE</p>
+                  <h2>{t("controlPlaneFlow")}</h2>
+                  <p>{t("controlPlaneFlowText")}</p>
+                </div>
+                <Network aria-hidden="true" />
+              </div>
+              <div className="control-flow">
+                <DashboardPath index="01" icon={<FolderKanban />} title={t("projectLayer")} description={t("projectLayerText")} onClick={() => onNavigate("projects")} />
+                <DashboardPath index="02" icon={<KeyRound />} title={t("secretLayer")} description={t("secretLayerText")} onClick={() => onNavigate("secrets")} />
+                <DashboardPath index="03" icon={<ServerCog />} title={t("machineLayer")} description={t("machineLayerText")} onClick={() => onNavigate("integrations")} />
+              </div>
+              <code className="control-plane-protocol">PROJECT → SECRET → MACHINE ACCOUNT → SDK</code>
+            </article>
+            <div className="dashboard-rail">
+              <article className="panel system-panel">
+                <div className="panel-heading">
+                  <div>
+                    <p className="eyebrow">SYSTEM</p>
+                    <h2>{t("recentActivity")}</h2>
+                  </div>
+                  <span className="status-dot" aria-hidden="true" />
+                </div>
+                <p>{t("healthReady")}</p>
+                <dl className="system-facts">
+                  <div>
+                    <dt>{t("storageLayer")}</dt>
+                    <dd><code>SQLite · WAL</code></dd>
+                  </div>
+                  <div>
+                    <dt>{t("protocolLayer")}</dt>
+                    <dd><code>BWS · SDK</code></dd>
+                  </div>
+                  <div>
+                    <dt>API</dt>
+                    <dd><code>GET /health · 200 OK</code></dd>
+                  </div>
+                </dl>
+              </article>
+              <article className="panel security-panel">
+                <div className="panel-heading">
+                  <span className="panel-icon">
+                    <ShieldCheck aria-hidden="true" />
+                  </span>
+                  <span className="eyebrow">BOUNDARY</span>
+                </div>
                 <h2>{t("securityBoundary")}</h2>
                 <p>{t("securityBoundaryText")}</p>
-              </div>
-            </article>
-            <article className="panel">
-              <div className="panel-heading">
-                <div>
-                  <p className="eyebrow">SYSTEM</p>
-                  <h2>{t("recentActivity")}</h2>
-                </div>
-                <span className="status-dot" />
-              </div>
-              <p>{t("healthReady")}</p>
-              <code>GET /health · 200 OK</code>
-            </article>
+                <dl className="security-facts">
+                  <div>
+                    <dt>{t("webSession")}</dt>
+                    <dd><code>HttpOnly · CSRF</code></dd>
+                  </div>
+                  <div>
+                    <dt>{t("sdkClients")}</dt>
+                    <dd><code>MACHINE CREDENTIALS</code></dd>
+                  </div>
+                </dl>
+              </article>
+            </div>
           </section>
         </>
       )}
@@ -505,15 +560,30 @@ function DashboardPage({ notify, onNavigate }: { notify: (text: string, error?: 
   )
 }
 
-function Metric({ icon, label, value }: { icon: ReactNode; label: string; value?: number }) {
+function Metric({ icon, label, value, onClick }: { icon: ReactNode; label: string; value?: number; onClick: () => void }) {
   return (
-    <article className="metric">
-      <span>{icon}</span>
+    <button className="metric" type="button" aria-label={`${label}: ${value ?? "—"}`} onClick={onClick}>
+      <span className="metric-icon">{icon}</span>
       <div>
         <strong>{value ?? "—"}</strong>
         <small>{label}</small>
       </div>
-    </article>
+      <ChevronRight className="metric-arrow" aria-hidden="true" />
+    </button>
+  )
+}
+
+function DashboardPath({ index, icon, title, description, onClick }: { index: string; icon: ReactNode; title: string; description: string; onClick: () => void }) {
+  return (
+    <button className="dashboard-path" type="button" onClick={onClick}>
+      <span className="dashboard-path-index">{index}</span>
+      <span className="dashboard-path-icon">{icon}</span>
+      <span className="dashboard-path-copy">
+        <strong>{title}</strong>
+        <small>{description}</small>
+      </span>
+      <ChevronRight aria-hidden="true" />
+    </button>
   )
 }
 
