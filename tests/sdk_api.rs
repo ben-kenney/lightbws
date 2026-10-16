@@ -11,12 +11,12 @@ use lightbws::{
     db::{Database, entities::machine_session},
     domain::{
         ORGANIZATION_ID,
-        machines::{MachineRepository, UPSTREAM_CLIENT_ID, UPSTREAM_CLIENT_SECRET},
+        machines::MachineRepository,
         projects::ProjectRepository,
         users::{Role, UserRepository},
     },
 };
-use sea_orm::EntityTrait;
+use sea_orm::{ConnectionTrait, EntityTrait};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -26,35 +26,49 @@ struct Fixture {
     _data: TempDir,
     app: Router,
     db: Database,
+    manager_client_id: String,
+    manager_client_secret: String,
 }
 
 impl Fixture {
     async fn new() -> Self {
         let data = tempfile::tempdir().expect("tempdir");
-        let db = Database::connect(&data.path().join("sdk.sqlite3"))
+        let db = Database::connect(&data.path().join("sdk.sqlite3"), organization_key())
             .await
             .expect("database");
         let admin = UserRepository::new(db.clone())
             .create("admin", "Administrator", Role::Admin, "test-password-123")
             .await
             .expect("admin");
-        MachineRepository::new(db.clone())
-            .ensure_compatibility_account(admin.id)
+        // The SDK management account used to be seeded with the upstream fixtures' published
+        // credentials. Mint a regular token and flag the account instead.
+        let manager = MachineRepository::new(db.clone())
+            .issue("sdk-manager", admin.id)
             .await
-            .expect("compatibility account");
+            .expect("manager machine");
+        db.connection()
+            .execute_unprepared(&format!(
+                "UPDATE machine_accounts SET compatibility_account = 1 WHERE id = '{}'",
+                manager.account.id
+            ))
+            .await
+            .expect("flag manager machine");
+        let (manager_client_id, manager_client_secret) = token_credentials(&manager.access_token);
         let config = Config {
             bind: "127.0.0.1:0".parse().unwrap(),
             data_dir: data.path().into(),
             bootstrap_admin: None,
             cookie_secure: false,
-            upstream_compatibility_account: false,
             master_key: None,
+            organization_key_file: None,
             allow_plaintext_backups: false,
         };
         Self {
             _data: data,
             app: create_app(AppState::new(db.clone(), &config)),
             db,
+            manager_client_id,
+            manager_client_secret,
         }
     }
 
@@ -63,7 +77,7 @@ impl Fixture {
     }
 
     async fn bearer(&self) -> String {
-        self.bearer_for(UPSTREAM_CLIENT_ID, UPSTREAM_CLIENT_SECRET)
+        self.bearer_for(&self.manager_client_id, &self.manager_client_secret)
             .await
     }
 
@@ -397,7 +411,7 @@ async fn sdk_rejects_invalid_bearer_and_persists_project_secret_round_trip() {
         .await
         .expect("machines")
         .into_iter()
-        .find(|machine| machine.client_id.to_string() == UPSTREAM_CLIENT_ID)
+        .find(|machine| machine.client_id.to_string() == fixture.manager_client_id)
         .expect("compatibility machine");
     repository
         .set_revoked(machine.id, true)
@@ -605,4 +619,20 @@ async fn response_json(response: axum::response::Response) -> Value {
         .expect("body")
         .to_bytes();
     serde_json::from_slice(&body).expect("json")
+}
+
+fn organization_key() -> lightbws::sdk_crypto::OrganizationKey {
+    lightbws::sdk_crypto::OrganizationKey::random().expect("organization key")
+}
+
+fn token_credentials(access_token: &str) -> (String, String) {
+    let mut parts = access_token.splitn(3, '.');
+    assert_eq!(parts.next(), Some("0"));
+    let id = parts.next().expect("token id").to_owned();
+    let secret = parts
+        .next()
+        .and_then(|rest| rest.split(':').next())
+        .expect("client secret")
+        .to_owned();
+    (id, secret)
 }

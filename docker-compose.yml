@@ -11,13 +11,16 @@ services:
       LIGHTBWS_ADMIN_USERNAME: "${LIGHTBWS_ADMIN_USERNAME:-admin}"
       LIGHTBWS_ADMIN_PASSWORD: "${LIGHTBWS_ADMIN_PASSWORD:?Set LIGHTBWS_ADMIN_PASSWORD in .env}"
       LIGHTBWS_COOKIE_SECURE: "${LIGHTBWS_COOKIE_SECURE:-false}"
-      LIGHTBWS_ENABLE_UPSTREAM_COMPATIBILITY_ACCOUNT: "${LIGHTBWS_ENABLE_UPSTREAM_COMPATIBILITY_ACCOUNT:-false}"
       LIGHTBWS_MASTER_KEY: "${LIGHTBWS_MASTER_KEY:-}"
       RUST_LOG: "${RUST_LOG:-lightbws=info,tower_http=info}"
     volumes:
       - lightbws-data:/data
+      # The organization key lives outside the data volume so that copies of the database,
+      # its snapshots and its backups cannot be decrypted on their own. Back it up separately.
+      - lightbws-keys:/keys
     security_opt:
       - no-new-privileges:true
 
 volumes:
   lightbws-data:
+  lightbws-keys:

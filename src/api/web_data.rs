@@ -118,7 +118,10 @@ async fn list_projects(
 ) -> Result<Json<Vec<WebProject>>, AppError> {
     let access = AccessRepository::new(state.db.clone());
     let mut projects = Vec::new();
-    for project in ProjectRepository::new(state.db).list(query.trash).await? {
+    for project in ProjectRepository::new(state.db.clone())
+        .list(query.trash)
+        .await?
+    {
         if (!query.trash && project.deleted_at.is_some())
             || (query.trash && project.deleted_at.is_none())
         {
@@ -129,7 +132,7 @@ async fn list_projects(
             .user_project(session.user_id, session.user.role, id)
             .await?;
         if permissions.read {
-            let mut view = WebProject::try_from(project)?;
+            let mut view = WebProject::from_model(project, state.db.organization_key())?;
             view.permissions = permissions;
             projects.push(view);
         }
@@ -215,7 +218,7 @@ async fn list_secrets(
 ) -> Result<Json<Vec<WebSecret>>, AppError> {
     let access = AccessRepository::new(state.db.clone());
     let mut secrets = Vec::new();
-    for secret in SecretRepository::new(state.db)
+    for secret in SecretRepository::new(state.db.clone())
         .list(query.trash, query.project_id)
         .await?
     {
@@ -228,7 +231,7 @@ async fn list_secrets(
             .user_secret(session.user_id, session.user.role, &secret)
             .await?;
         if permissions.read {
-            let mut view = WebSecret::try_from(secret)?;
+            let mut view = WebSecret::from_model(secret, state.db.organization_key())?;
             view.permissions = permissions;
             secrets.push(view);
         }
@@ -246,7 +249,7 @@ async fn get_secret(
         .user_secret(session.user_id, session.user.role, &model)
         .await?;
     permissions.require_read()?;
-    let mut view = WebSecret::try_from(model)?;
+    let mut view = WebSecret::from_model(model, state.db.organization_key())?;
     view.permissions = permissions;
     record_user_event(&state, session.user_id, "secret.read", "secret", id).await?;
     Ok(Json(view))

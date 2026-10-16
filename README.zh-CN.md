@@ -59,6 +59,7 @@ LightBWS 适合为服务注入数据库连接地址、向 GitHub Actions 提供 
 docker run --name lightbws --restart unless-stopped \
   -p 127.0.0.1:8080:8080 \
   -v lightbws-data:/data \
+  -v lightbws-keys:/keys \
   -e LIGHTBWS_ADMIN_USERNAME=admin \
   -e LIGHTBWS_ADMIN_PASSWORD='replace-with-a-long-password' \
   ghcr.io/ca-x/lightbws:latest
@@ -75,7 +76,7 @@ docker compose up -d
 docker compose logs -f lightbws
 ```
 
-如果 `LIGHTBWS_ADMIN_PASSWORD` 为空，Compose 会拒绝启动，因此公开模板不会被用作已安装实例的管理员密码。命名卷 `lightbws-data` 会在容器升级后继续保留 SQLite 数据库和生成的 `master.key`。
+如果 `LIGHTBWS_ADMIN_PASSWORD` 为空，Compose 会拒绝启动，因此公开模板不会被用作已安装实例的管理员密码。命名卷 `lightbws-data` 会在容器升级后继续保留 SQLite 数据库和生成的 `master.key`。独立的命名卷 `lightbws-keys` 保存组织密钥文件，详见[组织密钥](#组织密钥)。
 
 镜像会同时发布到 `ghcr.io/ca-x/lightbws` 和 `docker.io/czyt/lightbws`。如需通过 Docker Hub 拉取，可在 `.env` 中设置 `LIGHTBWS_IMAGE=docker.io/czyt/lightbws:latest`。
 
@@ -94,6 +95,7 @@ docker compose up -d
 
 ```bash
 export LIGHTBWS_DATA_DIR=./data
+export LIGHTBWS_ORGANIZATION_KEY_FILE=/etc/lightbws/organization.key
 export LIGHTBWS_ADMIN_USERNAME=admin
 export LIGHTBWS_ADMIN_PASSWORD='replace-with-a-long-password'
 ./lightbws
@@ -117,10 +119,10 @@ export LIGHTBWS_ADMIN_PASSWORD='replace-with-a-long-password'
 | --- | --- | --- |
 | `LIGHTBWS_BIND` | `0.0.0.0:8080` | HTTP 监听地址。 |
 | `LIGHTBWS_DATA_DIR` | `data` | SQLite 数据库和生成的主密钥目录。 |
+| `LIGHTBWS_ORGANIZATION_KEY_FILE` | 必填（镜像中为 `/keys/organization.key`） | 加密所有已存储项目名称和密钥的组织密钥文件。必须位于 `LIGHTBWS_DATA_DIR` 之外，首次启动时自动生成。 |
 | `LIGHTBWS_ADMIN_USERNAME` | 无 | 初始管理员用户名。 |
 | `LIGHTBWS_ADMIN_PASSWORD` | 无 | 初始管理员密码，至少 6 个字符。 |
 | `LIGHTBWS_COOKIE_SECURE` | `false` | 要求 Web 会话 Cookie 只通过 HTTPS 传输。使用 HTTPS 反向代理时启用。 |
-| `LIGHTBWS_ENABLE_UPSTREAM_COMPATIBILITY_ACCOUNT` | `false` | 创建上游 SDK 测试夹具使用的公开固定凭据，仅用于兼容性测试。不要在共享或面向互联网的部署中启用。 |
 | `LIGHTBWS_MASTER_KEY` | 自动生成 | 用于加密存储备份凭据和自动备份归档的 Base64url 或十六进制 32 字节密钥。 |
 | `LIGHTBWS_ALLOW_PLAINTEXT_BACKUPS` | `false` | 允许在单次导出或备份目标中显式选择明文模式，加密模式仍为默认值。 |
 | `RUST_LOG` | `lightbws=info,tower_http=info` | 结构化日志过滤器。 |
@@ -142,6 +144,19 @@ openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n'
 ```
 
 请妥善保管并单独备份主密钥。不要在未重新加密受保护数据的情况下轮换或替换它。密钥一旦丢失或改变，已有的备份凭据和加密备份文件将无法恢复。
+
+### 组织密钥
+
+项目名称和密钥以 Bitwarden 密文形式存储，使用每个实例独有的随机 512 位组织密钥（AES-256-CBC 加 HMAC-SHA256）。LightBWS 在首次启动时生成该密钥，并以仅所有者可读的权限（Unix 上为 `0600`）写入 `LIGHTBWS_ORGANIZATION_KEY_FILE`。密钥文件必须位于 `LIGHTBWS_DATA_DIR` 之外，因此单独拿到数据目录副本、卷快照或其备份都无法解密。
+
+- 请把密钥文件当作凭据对待。它不会写入日志或 `.lightbws` 归档，也不要与数据库放在同一份未加密备份中。
+- 请单独备份。**密钥文件丢失即意味着所有已存储的密钥丢失**，无法恢复。
+- 数据库会记录该密钥的校验值。使用不同的密钥文件时 LightBWS 拒绝启动；对已绑定密钥的数据库，也不会自动生成新密钥。
+- SDK 客户端不会收到明文密钥。每个访问令牌的第二部分是创建令牌时生成的 16 个随机字节；服务器只保存用它包装后的组织密钥，并丢弃令牌的这一部分。仅凭数据库或代码仓库都无法解开。
+
+保护范围：泄露的数据库文件、卷快照、数据目录备份和容器导出。不保护：已被攻破的运行中主机。服务器需要在内存中持有密钥来向 Web 界面提供明文，因此能控制运行进程或读取密钥文件的人可以读取所有密钥。仍建议同时使用卷或磁盘加密（LUKS、ZFS 原生加密）。
+
+从 0.2.6 及更早版本升级：这些版本让所有实例共用一个由本仓库中公开常量派生的密钥，因此任何拿到数据库副本的人都能解密加密列。升级后首次启动时，LightBWS 会生成实例密钥文件，并在单个事务中重新加密所有仍可用公开密钥解密的值；它会记录迁移前后的数量，只有确认没有任何值仍可用公开密钥解密时才提交。升级前创建的机器访问令牌都携带公开密钥，因此会被吊销，请在 Web 界面中重新创建。`LIGHTBWS_ENABLE_UPSTREAM_COMPATIBILITY_ACCOUNT` 已移除，因为其公开固定凭据只能通过暴露组织密钥才能工作；该变量设为 `true` 时 LightBWS 拒绝启动。升级前的数据库副本、快照和备份仍可用公开密钥读取，请删除或重新保护它们。
 
 ## 权限模型
 
@@ -169,10 +184,10 @@ LightBWS 按照 Bitwarden Secrets Manager 的模型实现权限系统。系统�
 
 LightBWS 实现官方 SDK 使用的 Secrets Manager 路由。网页新建项目和 Secret 默认都兼容 BWS，不需要选择网页或 SDK 类型。无项目 Secret 也按 Bitwarden 密文保存，通过直接授权机器账户即可在 BWS 使用；项目用于继承权限，并提供 fnox 所需的项目 ID。请在网页创建机器账户、复制一次性凭据、授予一个或多个项目或单个 Secret，再将客户端指向 LightBWS 基础地址。凭据交换会签发随机的一小时 Bearer 令牌，并将摘要写入 SQLite。每次 SDK 请求都会检查令牌是否过期，以及机器账户是否仍处于有效状态。
 
-正常部署应使用 Web 界面创建的机器账号。`LIGHTBWS_ENABLE_UPSTREAM_COMPATIBILITY_ACCOUNT` 只用于运行依赖公开固定客户端凭据的上游 SDK 测试夹具。它是测试兼容开关，不是生产认证模式。
+请使用 Web 界面创建的机器账号。访问令牌显示时请完整复制：冒号后的部分是 LightBWS 不会保存的每令牌密钥，令牌丢失后无法再次显示，只能重新创建。
 
 ```bash
-export BWS_ACCESS_TOKEN='0.<client-id>.<client-secret>:X8vbvA0bduihIDe/qrzIQQ=='
+export BWS_ACCESS_TOKEN='0.<token-id>.<client-secret>:<per-token-key>'
 bws --server-url https://lightbws.example.com project list
 ```
 
@@ -222,6 +237,8 @@ fnox exec -- npm start
 - 默认备份范围只包含项目和密钥。可选范围包括用户、用户组及成员关系、机器账户、授权策略、审计设置和记录，以及备份目标配置和凭据。“完整实例”预设包含全部持久化范围，可以重建持久化数据库。
 - 会话、机器会话、备份任务历史、迁移元数据、SQLite WAL 状态和 `master.key` 永远不会写入归档。
 - 手动加密导出使用独立的口令派生 Argon2id 密钥，可在不同 LightBWS 实例之间迁移；导入时使用同一口令。
+- 组织密钥文件永远不会写入归档。归档会用一个保存在（加密）归档内的一次性密钥重新加密项目名称和密钥，导入时再用目标实例的组织密钥重新加密。0.2.6 及更早版本的归档在导入时从公开的旧密钥重新加密。
+- 机器访问令牌包装的是其所在实例的组织密钥。完整实例恢复只有在目标实例使用来源实例的密钥文件时才保留令牌可用；否则恢复的令牌会被吊销，需要重新创建。
 - S3 和 WebDAV 定时快照使用持久化的实例主密钥加密。要在其他实例恢复，请提供来源实例的旧 `master.key`；它只用于解密所选归档，不会替换目标实例的密钥。
 - `.lightbws` 归档永远不会包含或同时上传 `master.key`，请单独备份。归档内的备份目标凭据在导入后会使用目标实例的主密钥重新加密。
 - 导入的备份目标始终处于停用状态，定时任务也会关闭。请逐一检查并测试目标地址，再显式启用。如果目标实例未开放明文能力，导入的明文目标会转换为主密钥加密。

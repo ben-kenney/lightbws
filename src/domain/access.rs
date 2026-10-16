@@ -16,7 +16,6 @@ use crate::{
     },
     domain::{machines::MachineAccount, next_sdk_revision, now, users::Role},
     error::AppError,
-    sdk_crypto,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
@@ -547,7 +546,10 @@ impl AccessRepository {
                 grantee_id: Uuid::parse_str(&project.id).map_err(AppError::internal)?,
                 name: match (project.name_plain, project.name_cipher) {
                     (Some(name), _) => name,
-                    (_, Some(cipher)) => sdk_crypto::decrypt(&cipher)
+                    (_, Some(cipher)) => self
+                        .db
+                        .organization_key()
+                        .decrypt(&cipher)
                         .unwrap_or_else(|_| "Encrypted SDK project".into()),
                     _ => "Project".into(),
                 },

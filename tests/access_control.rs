@@ -13,7 +13,7 @@ use lightbws::{
 #[tokio::test]
 async fn effective_permissions_combine_direct_group_project_and_secret_grants() {
     let data = tempfile::tempdir().expect("tempdir");
-    let db = Database::connect(&data.path().join("access.sqlite3"))
+    let db = Database::connect(&data.path().join("access.sqlite3"), organization_key())
         .await
         .expect("database");
     let users = UserRepository::new(db.clone());
@@ -179,7 +179,7 @@ async fn effective_permissions_combine_direct_group_project_and_secret_grants() 
 #[tokio::test]
 async fn invalid_policy_replacement_is_atomic() {
     let data = tempfile::tempdir().expect("tempdir");
-    let db = Database::connect(&data.path().join("atomic.sqlite3"))
+    let db = Database::connect(&data.path().join("atomic.sqlite3"), organization_key())
         .await
         .expect("database");
     let user = UserRepository::new(db.clone())
@@ -226,4 +226,8 @@ async fn invalid_policy_replacement_is_atomic() {
     assert_eq!(view.users.len(), 1);
     assert!(view.users[0].read);
     assert!(!view.users[0].write);
+}
+
+fn organization_key() -> lightbws::sdk_crypto::OrganizationKey {
+    lightbws::sdk_crypto::OrganizationKey::random().expect("organization key")
 }

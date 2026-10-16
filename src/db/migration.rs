@@ -5,7 +5,52 @@ pub struct Migrator;
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(InitialMigration), Box::new(BackupOptionsMigration)]
+        vec![
+            Box::new(InitialMigration),
+            Box::new(BackupOptionsMigration),
+            Box::new(OrganizationKeyMigration),
+        ]
+    }
+}
+
+struct OrganizationKeyMigration;
+
+impl MigrationName for OrganizationKeyMigration {
+    fn name(&self) -> &str {
+        "m20261016_000003_organization_key"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for OrganizationKeyMigration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(
+                r#"
+                ALTER TABLE organizations
+                ADD COLUMN key_check TEXT
+                CHECK(key_check IS NULL OR length(key_check) BETWEEN 1 AND 1024);
+                ALTER TABLE machine_access_tokens
+                ADD COLUMN encrypted_payload TEXT
+                CHECK(encrypted_payload IS NULL OR length(encrypted_payload) BETWEEN 1 AND 4096);
+                "#,
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(
+                r#"
+                ALTER TABLE machine_access_tokens DROP COLUMN encrypted_payload;
+                ALTER TABLE organizations DROP COLUMN key_check;
+                "#,
+            )
+            .await?;
+        Ok(())
     }
 }
 

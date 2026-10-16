@@ -12,6 +12,8 @@ pub struct Model {
     pub last_used_at: Option<i64>,
     pub revoked_at: Option<i64>,
     pub created_at: i64,
+    #[serde(default)]
+    pub encrypted_payload: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

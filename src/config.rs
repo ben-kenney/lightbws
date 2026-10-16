@@ -15,9 +15,9 @@ pub struct Config {
     pub data_dir: PathBuf,
     pub bootstrap_admin: Option<BootstrapAdmin>,
     pub cookie_secure: bool,
-    pub upstream_compatibility_account: bool,
     pub allow_plaintext_backups: bool,
     pub master_key: Option<SecretString>,
+    pub organization_key_file: Option<PathBuf>,
 }
 
 impl Config {
@@ -39,18 +39,23 @@ impl Config {
             _ => bail!("LIGHTBWS_ADMIN_USERNAME and LIGHTBWS_ADMIN_PASSWORD must be set together"),
         };
         let cookie_secure = parse_bool("LIGHTBWS_COOKIE_SECURE", false)?;
-        let upstream_compatibility_account =
-            parse_bool("LIGHTBWS_ENABLE_UPSTREAM_COMPATIBILITY_ACCOUNT", false)?;
+        if parse_bool("LIGHTBWS_ENABLE_UPSTREAM_COMPATIBILITY_ACCOUNT", false)? {
+            bail!(
+                "LIGHTBWS_ENABLE_UPSTREAM_COMPATIBILITY_ACCOUNT has been removed: its fixed public \
+                 credentials could only work by exposing the organization key"
+            );
+        }
         let allow_plaintext_backups = parse_bool("LIGHTBWS_ALLOW_PLAINTEXT_BACKUPS", false)?;
         let master_key = env_value("LIGHTBWS_MASTER_KEY").map(SecretString::from);
+        let organization_key_file = env_value("LIGHTBWS_ORGANIZATION_KEY_FILE").map(PathBuf::from);
         Ok(Self {
             bind,
             data_dir,
             bootstrap_admin,
             cookie_secure,
-            upstream_compatibility_account,
             allow_plaintext_backups,
             master_key,
+            organization_key_file,
         })
     }
 
@@ -60,6 +65,29 @@ impl Config {
 
     pub fn master_key_path(&self) -> PathBuf {
         self.data_dir.join("master.key")
+    }
+
+    /// The organization keyfile. It must live outside the data directory so that a copy of the
+    /// data directory, a snapshot or a backup of it is not enough to decrypt stored secrets.
+    pub fn organization_key_path(&self) -> Result<PathBuf> {
+        let Some(path) = &self.organization_key_file else {
+            bail!(
+                "LIGHTBWS_ORGANIZATION_KEY_FILE must name the organization keyfile, outside \
+                 LIGHTBWS_DATA_DIR (for example /etc/lightbws/organization.key)"
+            );
+        };
+        let data_dir =
+            std::path::absolute(&self.data_dir).context("failed to resolve LIGHTBWS_DATA_DIR")?;
+        let data_dir = data_dir.canonicalize().unwrap_or(data_dir);
+        let key_path = std::path::absolute(path).context("failed to resolve the keyfile path")?;
+        let key_dir = key_path
+            .parent()
+            .map(|parent| parent.canonicalize().unwrap_or_else(|_| parent.to_owned()))
+            .unwrap_or_default();
+        if key_dir.starts_with(&data_dir) {
+            bail!("LIGHTBWS_ORGANIZATION_KEY_FILE must be outside LIGHTBWS_DATA_DIR");
+        }
+        Ok(key_path)
     }
 }
 
@@ -102,22 +130,19 @@ impl std::fmt::Debug for Config {
             .field("data_dir", &self.data_dir)
             .field("bootstrap_admin", &self.bootstrap_admin.is_some())
             .field("cookie_secure", &self.cookie_secure)
-            .field(
-                "upstream_compatibility_account",
-                &self.upstream_compatibility_account,
-            )
             .field("allow_plaintext_backups", &self.allow_plaintext_backups)
             .field(
                 "master_key",
                 &self.master_key.as_ref().map(|_| "[REDACTED]"),
             )
+            .field("organization_key_file", &self.organization_key_file)
             .finish()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_password, validate_username};
+    use super::{Config, validate_password, validate_username};
 
     #[test]
     fn validates_bootstrap_credentials() {
@@ -126,5 +151,37 @@ mod tests {
         assert!(validate_username("bad\nname").is_err());
         assert!(validate_password("123456").is_ok());
         assert!(validate_password("12345").is_err());
+    }
+
+    #[test]
+    fn organization_keyfile_must_be_outside_the_data_directory() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let data_dir = root.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let config = |key: Option<std::path::PathBuf>| Config {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            data_dir: data_dir.clone(),
+            bootstrap_admin: None,
+            cookie_secure: false,
+            allow_plaintext_backups: false,
+            master_key: None,
+            organization_key_file: key,
+        };
+        assert!(config(None).organization_key_path().is_err());
+        assert!(
+            config(Some(data_dir.join("organization.key")))
+                .organization_key_path()
+                .is_err()
+        );
+        assert!(
+            config(Some(data_dir.join("nested").join("organization.key")))
+                .organization_key_path()
+                .is_err()
+        );
+        assert!(
+            config(Some(root.path().join("keys").join("organization.key")))
+                .organization_key_path()
+                .is_ok()
+        );
     }
 }

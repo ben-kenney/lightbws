@@ -82,9 +82,12 @@ use uuid::Uuid;
 #[tokio::test]
 async fn portable_export_round_trips_projects_and_secrets() {
     let source_data = tempfile::tempdir().expect("source tempdir");
-    let source = Database::connect(&source_data.path().join("source.sqlite3"))
-        .await
-        .expect("source database");
+    let source = Database::connect(
+        &source_data.path().join("source.sqlite3"),
+        organization_key(),
+    )
+    .await
+    .expect("source database");
     let project = ProjectRepository::new(source.clone())
         .create_plain("Production")
         .await
@@ -103,9 +106,12 @@ async fn portable_export_round_trips_projects_and_secrets() {
     let plaintext = decrypt_portable("portable-passphrase-123", &envelope).expect("decrypt");
 
     let target_data = tempfile::tempdir().expect("target tempdir");
-    let target = Database::connect(&target_data.path().join("target.sqlite3"))
-        .await
-        .expect("target database");
+    let target = Database::connect(
+        &target_data.path().join("target.sqlite3"),
+        organization_key(),
+    )
+    .await
+    .expect("target database");
     let summary = import_database(&target, &plaintext).await.expect("import");
     assert_eq!(summary.projects, 1);
     assert_eq!(summary.secrets, 1);
@@ -132,9 +138,13 @@ async fn portable_export_round_trips_projects_and_secrets() {
 #[tokio::test]
 async fn scoped_backup_round_trips_unassigned_encrypted_secrets() {
     let source_data = tempfile::tempdir().expect("source tempdir");
-    let source = Database::connect(&source_data.path().join("source-unassigned.sqlite3"))
-        .await
-        .expect("source database");
+    let source_key = organization_key();
+    let source = Database::connect(
+        &source_data.path().join("source-unassigned.sqlite3"),
+        source_key.clone(),
+    )
+    .await
+    .expect("source database");
     let project = ProjectRepository::new(source.clone())
         .create_sdk("Disposable SDK project")
         .await
@@ -153,9 +163,13 @@ async fn scoped_backup_round_trips_unassigned_encrypted_secrets() {
         .await
         .expect("dump unassigned encrypted secret");
     let target_data = tempfile::tempdir().expect("target tempdir");
-    let target = Database::connect(&target_data.path().join("target-unassigned.sqlite3"))
-        .await
-        .expect("target database");
+    let target_key = organization_key();
+    let target = Database::connect(
+        &target_data.path().join("target-unassigned.sqlite3"),
+        target_key.clone(),
+    )
+    .await
+    .expect("target database");
     import_database_scoped(&target, &master_key, &dump, false, false)
         .await
         .expect("restore unassigned encrypted secret");
@@ -169,14 +183,26 @@ async fn scoped_backup_round_trips_unassigned_encrypted_secrets() {
     assert!(restored.value_cipher.is_some());
     assert!(restored.note_cipher.is_some());
     assert_eq!(restored.key_plain, None);
+    // The archive moved the secret from the source instance key to the target instance key.
+    let value_cipher = restored.value_cipher.as_deref().expect("value cipher");
+    assert_eq!(
+        target_key.decrypt(value_cipher).expect("target key"),
+        "encrypted value"
+    );
+    assert!(source_key.decrypt(value_cipher).is_err());
 }
 
 #[tokio::test]
 async fn full_instance_dump_rebuilds_persistent_application_state() {
     let source_data = tempfile::tempdir().expect("source tempdir");
-    let source = Database::connect(&source_data.path().join("source-full.sqlite3"))
-        .await
-        .expect("source database");
+    // Disaster recovery onto a new host: the operator restores the archive and the keyfile.
+    let instance_key = organization_key();
+    let source = Database::connect(
+        &source_data.path().join("source-full.sqlite3"),
+        instance_key.clone(),
+    )
+    .await
+    .expect("source database");
     let users = UserRepository::new(source.clone());
     users
         .bootstrap(Some(&BootstrapAdmin {
@@ -274,14 +300,18 @@ async fn full_instance_dump_rebuilds_persistent_application_state() {
         .await
         .expect("full dump");
     let target_data = tempfile::tempdir().expect("target tempdir");
-    let target = Database::connect(&target_data.path().join("target-full.sqlite3"))
-        .await
-        .expect("target database");
+    let target = Database::connect(
+        &target_data.path().join("target-full.sqlite3"),
+        instance_key,
+    )
+    .await
+    .expect("target database");
     let target_key = MasterKey::random().expect("target key");
     let summary = import_database_scoped(&target, &target_key, &dump, true, false)
         .await
         .expect("full import");
     assert!(summary.full_instance);
+    assert_eq!(summary.revoked_access_tokens, 0);
     import_database_scoped(&target, &target_key, &dump, false, false)
         .await
         .expect("idempotent full merge");
@@ -367,9 +397,12 @@ async fn full_instance_dump_rebuilds_persistent_application_state() {
 #[tokio::test]
 async fn machine_account_merge_preserves_target_only_credentials() {
     let source_data = tempfile::tempdir().expect("source tempdir");
-    let source = Database::connect(&source_data.path().join("source-machines.sqlite3"))
-        .await
-        .expect("source database");
+    let source = Database::connect(
+        &source_data.path().join("source-machines.sqlite3"),
+        organization_key(),
+    )
+    .await
+    .expect("source database");
     let source_admin = UserRepository::new(source.clone())
         .create(
             "source-admin",
@@ -385,9 +418,12 @@ async fn machine_account_merge_preserves_target_only_credentials() {
         .expect("source machine");
 
     let target_data = tempfile::tempdir().expect("target tempdir");
-    let target = Database::connect(&target_data.path().join("target-machines.sqlite3"))
-        .await
-        .expect("target database");
+    let target = Database::connect(
+        &target_data.path().join("target-machines.sqlite3"),
+        organization_key(),
+    )
+    .await
+    .expect("target database");
     let target_admin = UserRepository::new(target.clone())
         .create(
             "target-admin",
@@ -435,9 +471,12 @@ async fn machine_account_merge_preserves_target_only_credentials() {
 #[tokio::test]
 async fn scoped_import_merges_by_id_and_rolls_back_unique_conflicts() {
     let source_data = tempfile::tempdir().expect("source tempdir");
-    let source = Database::connect(&source_data.path().join("source-merge.sqlite3"))
-        .await
-        .expect("source database");
+    let source = Database::connect(
+        &source_data.path().join("source-merge.sqlite3"),
+        organization_key(),
+    )
+    .await
+    .expect("source database");
     let users = UserRepository::new(source.clone());
     users
         .create("first", "First", Role::Admin, "test-password-123")
@@ -461,9 +500,12 @@ async fn scoped_import_merges_by_id_and_rolls_back_unique_conflicts() {
         .expect("scoped dump");
 
     let target_data = tempfile::tempdir().expect("target tempdir");
-    let target = Database::connect(&target_data.path().join("target-merge.sqlite3"))
-        .await
-        .expect("target database");
+    let target = Database::connect(
+        &target_data.path().join("target-merge.sqlite3"),
+        organization_key(),
+    )
+    .await
+    .expect("target database");
     import_database_scoped(&target, &key, &dump, false, false)
         .await
         .expect("first import");
@@ -479,9 +521,12 @@ async fn scoped_import_merges_by_id_and_rolls_back_unique_conflicts() {
     );
 
     let rollback_data = tempfile::tempdir().expect("rollback tempdir");
-    let rollback = Database::connect(&rollback_data.path().join("rollback.sqlite3"))
-        .await
-        .expect("rollback database");
+    let rollback = Database::connect(
+        &rollback_data.path().join("rollback.sqlite3"),
+        organization_key(),
+    )
+    .await
+    .expect("rollback database");
     let mut forged: serde_json::Value = serde_json::from_slice(&dump).expect("dump json");
     let users = forged["users"].as_array_mut().expect("users array");
     users[1]["username"] = users[0]["username"].clone();
@@ -510,7 +555,7 @@ async fn scoped_import_merges_by_id_and_rolls_back_unique_conflicts() {
 #[tokio::test]
 async fn backup_credentials_are_encrypted_and_never_returned() {
     let data = tempfile::tempdir().expect("tempdir");
-    let db = Database::connect(&data.path().join("backup.sqlite3"))
+    let db = Database::connect(&data.path().join("backup.sqlite3"), organization_key())
         .await
         .expect("database");
     let repository = BackupRepository::new(db.clone(), MasterKey::random().expect("master key"));
@@ -621,4 +666,8 @@ async fn backup_credentials_are_encrypted_and_never_returned() {
         .expect("recovered job");
     assert_eq!(recovered.status, "failed");
     assert_eq!(recovered.error_code.as_deref(), Some("interrupted"));
+}
+
+fn organization_key() -> lightbws::sdk_crypto::OrganizationKey {
+    lightbws::sdk_crypto::OrganizationKey::random().expect("organization key")
 }

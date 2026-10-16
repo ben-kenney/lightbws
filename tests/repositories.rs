@@ -1,3 +1,4 @@
+use lightbws::sdk_crypto::OrganizationKey;
 use lightbws::{
     db::Database,
     domain::{
@@ -10,7 +11,11 @@ use lightbws::{
 use tempfile::TempDir;
 
 async fn database(data: &TempDir) -> Database {
-    Database::connect(&data.path().join("repository.sqlite3"))
+    database_with_key(data, organization_key()).await
+}
+
+async fn database_with_key(data: &TempDir, key: OrganizationKey) -> Database {
+    Database::connect(&data.path().join("repository.sqlite3"), key)
         .await
         .expect("database")
 }
@@ -18,7 +23,8 @@ async fn database(data: &TempDir) -> Database {
 #[tokio::test]
 async fn resources_persist_across_reconnect_and_soft_delete() {
     let data = tempfile::tempdir().expect("tempdir");
-    let db = database(&data).await;
+    let key = organization_key();
+    let db = database_with_key(&data, key.clone()).await;
     let user = UserRepository::new(db.clone())
         .create("admin", "Administrator", Role::Admin, "test-password-123")
         .await
@@ -41,13 +47,13 @@ async fn resources_persist_across_reconnect_and_soft_delete() {
         .expect("soft delete");
     drop(db);
 
-    let reopened = database(&data).await;
+    let reopened = database_with_key(&data, key).await;
     let projects = ProjectRepository::new(reopened.clone())
         .list(false)
         .await
         .expect("projects")
         .into_iter()
-        .map(WebProject::try_from)
+        .map(|model| WebProject::from_model(model, reopened.organization_key()))
         .collect::<Result<Vec<_>, _>>()
         .expect("public projects");
     let active = SecretRepository::new(reopened.clone())
@@ -59,7 +65,7 @@ async fn resources_persist_across_reconnect_and_soft_delete() {
         .await
         .expect("all secrets")
         .into_iter()
-        .map(WebSecret::try_from)
+        .map(|model| WebSecret::from_model(model, reopened.organization_key()))
         .collect::<Result<Vec<_>, _>>()
         .expect("public secrets");
     let machines = MachineRepository::new(reopened)
@@ -185,4 +191,8 @@ async fn web_and_sdk_representations_remain_mutually_exclusive() {
     assert!(stored.key_cipher.is_none());
     assert!(stored.value_cipher.is_none());
     assert!(stored.note_cipher.is_none());
+}
+
+fn organization_key() -> OrganizationKey {
+    OrganizationKey::random().expect("organization key")
 }
