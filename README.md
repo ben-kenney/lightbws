@@ -154,9 +154,45 @@ Project names and Secrets are stored as Bitwarden ciphertext under a random 512-
 - The database records a check value for its key. LightBWS refuses to start with a different keyfile, and refuses to generate a new one for a database that already has one.
 - SDK clients never receive the key in the clear. Each access token's second half is 16 random bytes created when the token is minted; the server stores only the organization key wrapped under it and discards the token's half. Neither the database nor the repository can unwrap it.
 
+To back up the keyfile from the Docker volume (Compose prefixes the volume with the project name, for example `lightbws_lightbws-keys`; `docker volume ls` shows it):
+
+```bash
+docker run --rm -v lightbws-keys:/keys:ro -v "$PWD":/out busybox \
+  cp /keys/organization.key /out/organization.key.backup
+chmod 600 organization.key.backup
+```
+
+Store the copy somewhere other than the database backups, such as a password manager; the key is a single line of text. To restore it into an empty volume, copy it back to `/keys/organization.key`, owned by uid `65532` with mode `0600`.
+
 What this protects: leaked database files, volume snapshots, data-directory backups and container exports. What it does not protect: a compromised running host. The server holds the key in memory to serve plaintext to the Web UI, so anyone who controls the running process or can read the keyfile can read every Secret. Volume or disk encryption (LUKS, ZFS native encryption) is still worthwhile alongside it.
 
-Upgrading from 0.2.6 or earlier: those releases encrypted every installation's data under one key derived from constants published in this repository, so the encrypted columns offered no protection against anyone holding a copy of the database. On the first start after upgrading, LightBWS generates the instance keyfile and, in one transaction, re-encrypts every value that still decrypts under the published key. It logs the counts before and after and refuses to commit unless no value remains readable with the published key. Every machine access token minted before the upgrade carried the published key and is revoked; mint new tokens in the Web UI. `LIGHTBWS_ENABLE_UPSTREAM_COMPATIBILITY_ACCOUNT` has been removed, because its fixed public credentials could only work by exposing the organization key; LightBWS refuses to start while it is set to `true`. Older copies of the database, snapshots and backups taken before the upgrade remain readable with the published key, so delete or re-protect them.
+### Upgrading from 0.2.6 or earlier
+
+Releases up to 0.2.6 encrypted every installation's data under one key derived from constants published in this repository, so the encrypted columns offered no protection against anyone holding a copy of the database. There are two ways to move that data under a per-instance key. Either way:
+
+- Every machine access token from the old installation is revoked. Mint new tokens in the Web UI and update the clients that use them.
+- `LIGHTBWS_ENABLE_UPSTREAM_COMPATIBILITY_ACCOUNT` has been removed, because its fixed public credentials could only work by exposing the organization key. LightBWS refuses to start while it is set to `true`.
+- Old database copies, snapshots, backups and archives from before the move remain readable with the published key. Delete or re-protect them once the new installation is verified.
+
+#### Option 1: upgrade in place
+
+1. Stop LightBWS and copy the data directory or volume, so you can roll back.
+2. Start the new release on the same data, with `LIGHTBWS_ORGANIZATION_KEY_FILE` pointing outside the data directory (the Docker image and Compose file already use the `lightbws-keys` volume).
+3. On first start LightBWS generates the keyfile and, in one transaction, re-encrypts every value that still decrypts under the published key. It refuses to commit unless no value remains readable with the published key. Check the log line `bound database to its organization key`: `legacy_before` is the number of values re-encrypted, `legacy_after` must be `0`, and `revoked_access_tokens` counts the old tokens.
+4. Back up the new keyfile (see [Organization key](#organization-key)).
+
+The old release cannot read the database after this. Rolling back means restoring the copy from step 1.
+
+#### Option 2: export and import into a new installation
+
+This leaves the old installation untouched until you retire it.
+
+1. On the 0.2.6 installation, open **Import & export**, choose **Full instance** as the scope, set a passphrase and download the encrypted export. The default scope carries only projects and Secrets; Full instance also carries users, groups, machine accounts, access policies, audit data and backup targets.
+2. Install the new release with its own data directory and keyfile volume, as in [Quick start](#quick-start), and back up its keyfile.
+3. On the new installation, open **Import & export**, choose the archive and enter the passphrase. To make the new installation an exact copy of the old one, select **Replace current durable data**; this replaces the users created at install time and signs everyone out, so sign in with an account from the old installation.
+4. LightBWS re-encrypts the imported project names and Secrets from the published key under the new organization key. Open a few Secrets in the Web UI to confirm they read correctly.
+5. Imported backup targets arrive disabled. Review and re-enable them.
+6. Stop the old installation, then delete or re-protect its data and the exported archive.
 
 ## Access model
 
