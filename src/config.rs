@@ -1,4 +1,7 @@
-use std::{net::SocketAddr, path::PathBuf};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, bail};
 use secrecy::SecretString;
@@ -76,18 +79,39 @@ impl Config {
                  LIGHTBWS_DATA_DIR (for example /etc/lightbws/organization.key)"
             );
         };
-        let data_dir =
-            std::path::absolute(&self.data_dir).context("failed to resolve LIGHTBWS_DATA_DIR")?;
-        let data_dir = data_dir.canonicalize().unwrap_or(data_dir);
+        let data_dir = resolve(&self.data_dir).context("failed to resolve LIGHTBWS_DATA_DIR")?;
         let key_path = std::path::absolute(path).context("failed to resolve the keyfile path")?;
-        let key_dir = key_path
-            .parent()
-            .map(|parent| parent.canonicalize().unwrap_or_else(|_| parent.to_owned()))
-            .unwrap_or_default();
-        if key_dir.starts_with(&data_dir) {
+        // Resolving the keyfile itself also catches a symlink that points into the data directory.
+        let resolved_key = resolve(&key_path).context("failed to resolve the keyfile path")?;
+        if resolved_key.starts_with(&data_dir) {
             bail!("LIGHTBWS_ORGANIZATION_KEY_FILE must be outside LIGHTBWS_DATA_DIR");
         }
         Ok(key_path)
+    }
+}
+
+/// Canonicalizes the nearest existing ancestor of `path` and re-appends the missing components, so
+/// that paths whose directories do not exist yet compare in the same form as existing ones.
+fn resolve(path: &Path) -> Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    let mut existing = absolute.as_path();
+    let mut missing = Vec::new();
+    loop {
+        match existing.canonicalize() {
+            Ok(resolved) => {
+                return Ok(missing
+                    .into_iter()
+                    .rev()
+                    .fold(resolved, |path, part| path.join(part)));
+            }
+            Err(_) => {
+                let (Some(parent), Some(name)) = (existing.parent(), existing.file_name()) else {
+                    return Ok(absolute);
+                };
+                missing.push(name.to_owned());
+                existing = parent;
+            }
+        }
     }
 }
 
@@ -183,5 +207,21 @@ mod tests {
                 .organization_key_path()
                 .is_ok()
         );
+        // A data directory that does not exist yet still compares correctly.
+        let missing_data = root.path().join("not-yet").join("data");
+        let mut missing = config(Some(missing_data.join("keys").join("organization.key")));
+        missing.data_dir = missing_data.clone();
+        assert!(missing.organization_key_path().is_err());
+        // A keyfile symlinked into the data directory is rejected.
+        #[cfg(unix)]
+        {
+            let target = data_dir.join("organization.key");
+            std::fs::write(&target, "key").unwrap();
+            let link_dir = root.path().join("etc");
+            std::fs::create_dir_all(&link_dir).unwrap();
+            let link = link_dir.join("organization.key");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            assert!(config(Some(link)).organization_key_path().is_err());
+        }
     }
 }

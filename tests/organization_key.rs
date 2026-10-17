@@ -309,6 +309,19 @@ async fn restoring_into_a_different_key_revokes_machine_tokens() {
         .await
         .expect("restore");
     assert_eq!(summary.revoked_access_tokens, 1);
+    assert_eq!(summary.unreadable_sdk_values, 0);
+    let foreign_payloads = target
+        .connection()
+        .query_one_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "SELECT COUNT(*) AS kept FROM machine_access_tokens WHERE encrypted_payload IS NOT NULL",
+        ))
+        .await
+        .expect("query")
+        .expect("row")
+        .try_get::<i64>("", "kept")
+        .expect("count");
+    assert_eq!(foreign_payloads, 0, "source wrapped keys must not be kept");
     let cipher = ProjectRepository::new(target.clone())
         .get(project.id)
         .await
@@ -320,4 +333,39 @@ async fn restoring_into_a_different_key_revokes_machine_tokens() {
         "Production"
     );
     assert!(source.organization_key().decrypt(&cipher).is_err());
+}
+
+#[tokio::test]
+async fn import_counts_well_formed_ciphertext_it_cannot_decrypt() {
+    let source_data = tempfile::tempdir().expect("tempdir");
+    let source = Database::connect(&source_data.path().join("source.sqlite3"), key())
+        .await
+        .expect("source");
+    ProjectRepository::new(source.clone())
+        .create_sdk("Readable")
+        .await
+        .expect("project");
+    ProjectRepository::new(source.clone())
+        .create_sdk("Damaged")
+        .await
+        .expect("project");
+    let master_key = MasterKey::random().expect("master key");
+    let dump = dump_database_scoped(&source, &master_key, BackupScopes::default())
+        .await
+        .expect("dump");
+    let mut dump: Value = serde_json::from_slice(&dump).expect("json");
+    // One value written under an unrelated key, one opaque non-EncString value.
+    dump["projects"][0]["nameCipher"] = Value::String(key().encrypt("lost").expect("encrypt"));
+    dump["projects"][1]["nameCipher"] = Value::String("2.opaque-client-data".into());
+    let dump = serde_json::to_vec(&dump).expect("serialize");
+
+    let target_data = tempfile::tempdir().expect("tempdir");
+    let target = Database::connect(&target_data.path().join("target.sqlite3"), key())
+        .await
+        .expect("target");
+    let summary = import_database_scoped(&target, &master_key, &dump, false, false)
+        .await
+        .expect("import keeps going");
+    assert_eq!(summary.projects, 2);
+    assert_eq!(summary.unreadable_sdk_values, 1);
 }

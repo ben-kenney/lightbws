@@ -84,5 +84,5 @@ export const api = {
     if (!response.ok) throw new ApiError(response.status, "EXPORT_FAILED")
     return response.blob()
   },
-  import: (input: { passphrase?: string; masterKey?: string; dataBase64: string; replace: boolean }) => request<{ imported: { projects: number; secrets: number; fullInstance: boolean } }>("/transfer/import", json("POST", input)),
+  import: (input: { passphrase?: string; masterKey?: string; dataBase64: string; replace: boolean }) => request<{ imported: { projects: number; secrets: number; fullInstance: boolean; revokedAccessTokens: number; unreadableSdkValues: number } }>("/transfer/import", json("POST", input)),
 }

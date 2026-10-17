@@ -230,6 +230,8 @@ pub struct ImportSummary {
     pub secrets: usize,
     pub full_instance: bool,
     pub revoked_access_tokens: usize,
+    /// Well-formed SDK ciphertext the archive key could not decrypt, kept unchanged.
+    pub unreadable_sdk_values: usize,
 }
 
 pub async fn dump_database(db: &Database) -> Result<Vec<u8>, AppError> {
@@ -429,7 +431,7 @@ pub async fn import_database(db: &Database, bytes: &[u8]) -> Result<ImportSummar
     let secret_count = dump.secrets.len();
     let transport = parse_transport_key(dump.sdk_transport_key.as_deref())?;
     let mut dump = dump;
-    import_ciphers(
+    let unreadable_sdk_values = import_ciphers(
         &mut dump.projects,
         &mut dump.secrets,
         transport.as_ref(),
@@ -495,6 +497,7 @@ pub async fn import_database(db: &Database, bytes: &[u8]) -> Result<ImportSummar
         secrets: secret_count,
         full_instance: false,
         revoked_access_tokens: 0,
+        unreadable_sdk_values,
     })
 }
 
@@ -557,7 +560,7 @@ pub async fn import_database_scoped(
     let secret_count = dump.secrets.len();
     let mut dump = dump;
     let transport = parse_transport_key(dump.sdk_transport_key.as_deref())?;
-    import_ciphers(
+    let unreadable_sdk_values = import_ciphers(
         &mut dump.projects,
         &mut dump.secrets,
         transport.as_ref(),
@@ -569,7 +572,11 @@ pub async fn import_database_scoped(
     let timestamp = super::now();
     for token in dump.machine_access_tokens.iter_mut().flatten() {
         // A token wraps its source instance key; elsewhere it could only hand out the wrong key.
-        if token.revoked_at.is_none() && (!same_key || token.encrypted_payload.is_none()) {
+        if !same_key {
+            // Do not keep another instance's wrapped key material, even on a revoked token.
+            token.encrypted_payload = None;
+        }
+        if token.revoked_at.is_none() && token.encrypted_payload.is_none() {
             token.revoked_at = Some(timestamp.max(token.created_at));
             revoked_access_tokens += 1;
         }
@@ -760,6 +767,7 @@ pub async fn import_database_scoped(
         secrets: secret_count,
         full_instance: scopes.is_full_instance(),
         revoked_access_tokens,
+        unreadable_sdk_values,
     })
 }
 
@@ -827,24 +835,51 @@ fn import_ciphers(
     secrets: &mut [SecretRecord],
     transport: Option<&OrganizationKey>,
     target: &OrganizationKey,
-) -> Result<(), AppError> {
+) -> Result<usize, AppError> {
+    let mut unreadable = 0;
     for record in projects {
-        record.name_cipher = import_cipher(record.name_cipher.take(), transport, target)?;
+        record.name_cipher = import_cipher(
+            record.name_cipher.take(),
+            transport,
+            target,
+            &mut unreadable,
+        )?;
     }
     for record in secrets {
-        record.key_cipher = import_cipher(record.key_cipher.take(), transport, target)?;
-        record.value_cipher = import_cipher(record.value_cipher.take(), transport, target)?;
-        record.note_cipher = import_cipher(record.note_cipher.take(), transport, target)?;
+        record.key_cipher =
+            import_cipher(record.key_cipher.take(), transport, target, &mut unreadable)?;
+        record.value_cipher = import_cipher(
+            record.value_cipher.take(),
+            transport,
+            target,
+            &mut unreadable,
+        )?;
+        record.note_cipher = import_cipher(
+            record.note_cipher.take(),
+            transport,
+            target,
+            &mut unreadable,
+        )?;
     }
-    Ok(())
+    if unreadable > 0 {
+        tracing::warn!(
+            unreadable,
+            "imported SDK ciphertext that the archive key could not decrypt; those values are \
+             unreadable on this instance"
+        );
+    }
+    Ok(unreadable)
 }
 
 /// Re-encrypts archive ciphertext under the destination instance key. Archives without a
 /// transport key predate per-instance keys and were written under the published legacy key.
+/// Values that are not Bitwarden EncStrings at all (opaque client data) pass through silently;
+/// well-formed EncStrings that fail to decrypt also pass through but are counted.
 fn import_cipher(
     value: Option<String>,
     transport: Option<&OrganizationKey>,
     target: &OrganizationKey,
+    unreadable: &mut usize,
 ) -> Result<Option<String>, AppError> {
     let Some(value) = value else {
         return Ok(None);
@@ -855,8 +890,28 @@ fn import_cipher(
     };
     match plaintext {
         Ok(plaintext) => target.encrypt(&plaintext).map(Some),
-        Err(_) => Ok(Some(value)),
+        Err(_) => {
+            if is_enc_string(&value) {
+                *unreadable += 1;
+            }
+            Ok(Some(value))
+        }
     }
+}
+
+fn is_enc_string(value: &str) -> bool {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let Some(value) = value.strip_prefix("2.") else {
+        return false;
+    };
+    let parts = value.split('|').collect::<Vec<_>>();
+    matches!(
+        parts.as_slice(),
+        [iv, ciphertext, mac]
+            if STANDARD.decode(iv).is_ok_and(|iv| iv.len() == 16)
+                && STANDARD.decode(ciphertext).is_ok_and(|ct| !ct.is_empty() && ct.len() % 16 == 0)
+                && STANDARD.decode(mac).is_ok_and(|mac| mac.len() == 32)
+    )
 }
 
 async fn connection_delete(

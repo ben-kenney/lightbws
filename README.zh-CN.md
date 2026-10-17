@@ -196,7 +196,7 @@ chmod 600 organization.key.backup
 
 ## 权限模型
 
-LightBWS 按照 Bitwarden Secrets Manager 的模型实现权限系统。系统只有一个组织边界，不存在个人密钥空间。网页管理的密钥可以不属于项目；SDK 加密密钥则必须位于项目中。
+LightBWS 按照 Bitwarden Secrets Manager 的模型实现权限系统。系统只有一个组织边界，不存在个人密钥空间。网页创建的密钥可以不属于项目；永久删除项目后，其中的加密密钥也会变为无项目状态。
 
 | 实体 | 用途 | 权限方式 |
 | --- | --- | --- |

@@ -14,9 +14,10 @@ use cbc::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, block_padding::Pk
 use cbc::{Decryptor, Encryptor};
 use hmac::{Hmac, Mac};
 use rand::TryRng;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
+use zeroize::Zeroizing;
 
 use crate::error::AppError;
 
@@ -28,7 +29,7 @@ const ACCESS_KEY_LEN: usize = 16;
 #[derive(Clone)]
 pub struct OrganizationKey(Arc<[u8; KEY_LEN]>);
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct OrganizationPayload {
     encryption_key: String,
@@ -118,17 +119,18 @@ impl OrganizationKey {
     /// Wraps the organization key under a fresh random access key. The caller stores only the
     /// payload and hands the access key to the operator inside the access token.
     pub(crate) fn wrap_for_access_token(&self) -> Result<WrappedOrganizationKey, AppError> {
-        let mut access_key = [0_u8; ACCESS_KEY_LEN];
+        // Everything but the returned token half and the wrapped payload is wiped on return.
+        let mut access_key = Zeroizing::new([0_u8; ACCESS_KEY_LEN]);
         rand::rng()
-            .try_fill_bytes(&mut access_key)
+            .try_fill_bytes(access_key.as_mut())
             .map_err(AppError::internal)?;
-        let payload = serde_json::to_string(&OrganizationPayload {
-            encryption_key: STANDARD.encode(self.0.as_ref()),
-        })
-        .map_err(AppError::internal)?;
-        let encrypted_payload = encrypt_with_key(&payload, &derive_access_key(&access_key)?)?;
+        let encoded_key = Zeroizing::new(STANDARD.encode(self.0.as_ref()));
+        // Base64 needs no JSON escaping; formatting directly avoids an unwiped intermediate copy.
+        let payload = Zeroizing::new(format!(r#"{{"encryptionKey":"{}"}}"#, encoded_key.as_str()));
+        let wrapping_key = Zeroizing::new(derive_access_key(&access_key)?);
+        let encrypted_payload = encrypt_with_key(&payload, &wrapping_key)?;
         Ok(WrappedOrganizationKey {
-            access_key: STANDARD.encode(access_key),
+            access_key: STANDARD.encode(access_key.as_ref()),
             encrypted_payload,
         })
     }
