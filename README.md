@@ -59,6 +59,7 @@ Use LightBWS for workloads such as injecting a database URL into a service, supp
 docker run --name lightbws --restart unless-stopped \
   -p 127.0.0.1:8080:8080 \
   -v lightbws-data:/data \
+  -v lightbws-keys:/keys \
   -e LIGHTBWS_ADMIN_USERNAME=admin \
   -e LIGHTBWS_ADMIN_PASSWORD='replace-with-a-long-password' \
   ghcr.io/ca-x/lightbws:latest
@@ -75,7 +76,7 @@ docker compose up -d
 docker compose logs -f lightbws
 ```
 
-Compose refuses to start while `LIGHTBWS_ADMIN_PASSWORD` is empty, so the public template cannot become the installed administrator password. The named volume `lightbws-data` persists the SQLite database and generated `master.key` across container upgrades.
+Compose refuses to start while `LIGHTBWS_ADMIN_PASSWORD` is empty, so the public template cannot become the installed administrator password. The named volume `lightbws-data` persists the SQLite database and generated `master.key` across container upgrades. The separate volume `lightbws-keys` holds the organization keyfile; see [Organization key](#organization-key).
 
 Images are published to both `ghcr.io/ca-x/lightbws` and `docker.io/czyt/lightbws`. To use Docker Hub with Compose, set `LIGHTBWS_IMAGE=docker.io/czyt/lightbws:latest` in `.env`.
 
@@ -94,6 +95,7 @@ Download the archive for the current platform from GitHub Releases, then run:
 
 ```bash
 export LIGHTBWS_DATA_DIR=./data
+export LIGHTBWS_ORGANIZATION_KEY_FILE=/etc/lightbws/organization.key
 export LIGHTBWS_ADMIN_USERNAME=admin
 export LIGHTBWS_ADMIN_PASSWORD='replace-with-a-long-password'
 ./lightbws
@@ -117,10 +119,10 @@ The remaining values are passed into the LightBWS container:
 | --- | --- | --- |
 | `LIGHTBWS_BIND` | `0.0.0.0:8080` | HTTP listen address. |
 | `LIGHTBWS_DATA_DIR` | `data` | SQLite database and generated master-key directory. |
+| `LIGHTBWS_ORGANIZATION_KEY_FILE` | required (`/keys/organization.key` in the image) | Organization keyfile that encrypts every stored project name and Secret. Must be outside `LIGHTBWS_DATA_DIR`. Generated on first start. |
 | `LIGHTBWS_ADMIN_USERNAME` | none | Initial administrator username. |
 | `LIGHTBWS_ADMIN_PASSWORD` | none | Initial administrator password, minimum 6 characters. |
 | `LIGHTBWS_COOKIE_SECURE` | `false` | Require HTTPS for Web session cookies. Enable behind an HTTPS reverse proxy. |
-| `LIGHTBWS_ENABLE_UPSTREAM_COMPATIBILITY_ACCOUNT` | `false` | Create the upstream SDK test fixtures' publicly known fixed credentials. Never enable it on a shared or internet-facing deployment. |
 | `LIGHTBWS_MASTER_KEY` | generated | Base64url or hexadecimal 32-byte key used to encrypt stored backup credentials and automatic backup archives. |
 | `LIGHTBWS_ALLOW_PLAINTEXT_BACKUPS` | `false` | Unlock plaintext as an explicit per-export or per-target option. Encrypted mode remains the default. |
 | `RUST_LOG` | `lightbws=info,tower_http=info` | Structured log filter. |
@@ -142,6 +144,55 @@ openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n'
 ```
 
 Keep the key secret and back it up separately. Do not rotate or replace it without re-encrypting the protected data. Losing or changing the key makes existing stored backup credentials and encrypted backup files unrecoverable.
+
+### Organization key
+
+Project names and Secrets are stored as Bitwarden ciphertext under a random 512-bit organization key (AES-256-CBC plus HMAC-SHA256) that is unique to each installation. LightBWS generates it on first start and writes it to `LIGHTBWS_ORGANIZATION_KEY_FILE` with owner-only permissions (`0600` on Unix). The keyfile must be outside `LIGHTBWS_DATA_DIR`, so a copy of the data directory, a volume snapshot or a backup of it cannot be decrypted on its own.
+
+- Treat the keyfile as a credential. It is never logged, never written into `.lightbws` archives, and must not be stored in the same unencrypted backup as the database.
+- Back it up separately. **Losing the keyfile loses every stored Secret**; there is no recovery.
+- The database records a check value for its key. LightBWS refuses to start with a different keyfile, and refuses to generate a new one for a database that already has one.
+- SDK clients never receive the key in the clear. Each access token's second half is 16 random bytes created when the token is minted; the server stores only the organization key wrapped under it and discards the token's half. Neither the database nor the repository can unwrap it.
+
+To back up the keyfile from the Docker volume (Compose prefixes the volume with the project name, for example `lightbws_lightbws-keys`; `docker volume ls` shows it):
+
+```bash
+docker run --rm -v lightbws-keys:/keys:ro -v "$PWD":/out busybox \
+  cp /keys/organization.key /out/organization.key.backup
+chmod 600 organization.key.backup
+```
+
+Store the copy somewhere other than the database backups, such as a password manager; the key is a single line of text. To restore it into an empty volume, copy it back to `/keys/organization.key`, owned by uid `65532` with mode `0600`.
+
+What this protects: leaked database files, volume snapshots, data-directory backups and container exports. What it does not protect: a compromised running host. The server holds the key in memory to serve plaintext to the Web UI, so anyone who controls the running process or can read the keyfile can read every Secret. Volume or disk encryption (LUKS, ZFS native encryption) is still worthwhile alongside it.
+
+### Upgrading from 0.2.6 or earlier
+
+Releases up to 0.2.6 encrypted every installation's data under one key derived from constants published in this repository, so the encrypted columns offered no protection against anyone holding a copy of the database. There are two ways to move that data under a per-instance key. Either way:
+
+- Every machine access token from the old installation is revoked. Mint new tokens in the Web UI and update the clients that use them.
+- `LIGHTBWS_ENABLE_UPSTREAM_COMPATIBILITY_ACCOUNT` has been removed, because its fixed public credentials could only work by exposing the organization key. LightBWS refuses to start while it is set to `true`.
+- Old database copies, snapshots, backups and archives from before the move remain readable with the published key. Delete or re-protect them once the new installation is verified.
+
+#### Option 1: upgrade in place
+
+1. Stop LightBWS and copy the data directory or volume, so you can roll back.
+2. Start the new release on the same data, with `LIGHTBWS_ORGANIZATION_KEY_FILE` pointing outside the data directory (the Docker image and Compose file already use the `lightbws-keys` volume).
+3. On first start LightBWS generates the keyfile and, in one transaction, re-encrypts every value that still decrypts under the published key. It refuses to commit unless no value remains readable with the published key. Check the log line `bound database to its organization key`: `legacy_before` is the number of values re-encrypted, `legacy_after` must be `0`, and `revoked_access_tokens` counts the old tokens.
+4. Back up the new keyfile (see [Organization key](#organization-key)).
+
+The old release cannot read the database after this. Rolling back means restoring the copy from step 1.
+
+#### Option 2: export and import into a new installation
+
+This leaves the old installation untouched until you retire it.
+
+1. On the 0.2.6 installation, open **Import & export**, choose **Full instance** as the scope, set a passphrase and download the encrypted export. The default scope carries only projects and Secrets; Full instance also carries users, groups, machine accounts, access policies, audit data and backup targets.
+2. Install the new release with its own data directory and keyfile volume, as in [Quick start](#quick-start), and back up its keyfile.
+3. On the new installation, open **Import & export**, choose the archive and enter the passphrase. To make the new installation an exact copy of the old one, select **Replace current durable data**; this replaces the users created at install time and signs everyone out, so sign in with an account from the old installation.
+4. LightBWS re-encrypts the imported project names and Secrets from the published key under the new organization key. Open a few Secrets in the Web UI to confirm they read correctly.
+5. Imported backup targets arrive disabled. Review and re-enable them.
+6. Stop the old installation, then delete or re-protect its data and the exported archive.
 
 ## Access model
 
@@ -169,10 +220,10 @@ Audit events contain actor, action, resource identifier, outcome, and timestamp 
 
 LightBWS implements the Secrets Manager routes used by the official SDK. New Web projects and Secrets are BWS-compatible by default, with no Web/SDK type choice. Unassigned Secrets are also stored as Bitwarden ciphertext and can be used by BWS through direct machine grants; projects add inherited access and the project ID required by fnox. Create a machine account in the Web UI, copy its one-time credential, grant it one or more projects or individual Secrets, and point the client at the LightBWS base URL. Credential exchange issues a random one-hour bearer token whose digest is stored in SQLite. Every SDK request checks expiry and the machine account's current revocation state.
 
-Normal deployments must use machine accounts created in the Web UI. `LIGHTBWS_ENABLE_UPSTREAM_COMPATIBILITY_ACCOUNT` exists only for upstream SDK fixtures that expect publicly known fixed client credentials. It is a test compatibility switch, not a production authentication mode.
+Use machine accounts created in the Web UI. Copy the whole access token when it is shown: its part after the colon is a per-token key that LightBWS does not keep, so a lost token cannot be shown again and must be replaced.
 
 ```bash
-export BWS_ACCESS_TOKEN='0.<client-id>.<client-secret>:X8vbvA0bduihIDe/qrzIQQ=='
+export BWS_ACCESS_TOKEN='0.<token-id>.<client-secret>:<per-token-key>'
 bws --server-url https://lightbws.example.com project list
 ```
 
@@ -222,6 +273,8 @@ The authorization acceptance test uses the same `fnox.toml` throughout:
 - The default backup scope contains projects and secrets only. Optional scopes add users/groups/memberships, machine accounts, access policies, audit settings/events, and backup target configuration/credentials. The full-instance preset includes every persistent scope and can rebuild the durable database.
 - Sessions, machine sessions, backup-job history, migration metadata, SQLite WAL state, and `master.key` are never included in an archive.
 - Manual encrypted exports use an independent passphrase-derived Argon2id key and are portable between LightBWS installations. Import them with the same passphrase.
+- The organization keyfile is never included in an archive. Archives re-encrypt project names and Secrets under a one-off key stored inside the (encrypted) archive, and import re-encrypts them under the destination's organization key. Archives from 0.2.6 and earlier are re-encrypted from the published legacy key on import.
+- Machine access tokens wrap their instance's organization key. A full-instance restore keeps them usable only when the destination uses the source's keyfile; otherwise restored tokens are revoked and must be minted again.
 - Scheduled S3 and WebDAV snapshots are encrypted with the persistent instance master key. To restore one on another instance, provide the source instance's old `master.key`; it is used only to decrypt the selected archive and never replaces the destination key.
 - `master.key` is never embedded in or uploaded with a `.lightbws` archive. Back it up separately. Imported backup credentials are decrypted from the archive and re-encrypted with the destination instance's master key.
 - Imported backup targets are always restored disabled with scheduling off. Review and test each destination before explicitly enabling it. If plaintext capability is disabled on the destination, imported plaintext targets are converted to master-key encryption.

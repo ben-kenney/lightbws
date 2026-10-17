@@ -12,7 +12,7 @@ use crate::{
     },
     domain::{ORGANIZATION_ID, access::Permission, next_sdk_revision, now},
     error::AppError,
-    sdk_crypto,
+    sdk_crypto::OrganizationKey,
 };
 
 #[derive(Clone, Debug, Serialize)]
@@ -72,13 +72,15 @@ impl ProjectRepository {
         .insert(&transaction)
         .await?;
         transaction.commit().await?;
-        WebProject::try_from(model)
+        WebProject::from_model(model, self.db.organization_key())
     }
 
     pub async fn create_sdk(&self, name: &str) -> Result<WebProject, AppError> {
         let name = validate_name(name)?;
-        let model = self.create_cipher(sdk_crypto::encrypt(&name)?).await?;
-        WebProject::try_from(model)
+        let model = self
+            .create_cipher(self.db.organization_key().encrypt(&name)?)
+            .await?;
+        WebProject::from_model(model, self.db.organization_key())
     }
 
     pub async fn create_cipher(&self, name: String) -> Result<project::Model, AppError> {
@@ -116,15 +118,17 @@ impl ProjectRepository {
         model.revision_nanos = Set(revision_nanos);
         let model = model.update(&transaction).await?;
         transaction.commit().await?;
-        WebProject::try_from(model)
+        WebProject::from_model(model, self.db.organization_key())
     }
 
     pub async fn update_web(&self, id: Uuid, name: &str) -> Result<WebProject, AppError> {
         let existing = self.get(id).await?;
         if existing.name_cipher.is_some() {
             let name = validate_name(name)?;
-            let model = self.update_cipher(id, sdk_crypto::encrypt(&name)?).await?;
-            WebProject::try_from(model)
+            let model = self
+                .update_cipher(id, self.db.organization_key().encrypt(&name)?)
+                .await?;
+            WebProject::from_model(model, self.db.organization_key())
         } else {
             self.update_plain(id, name).await
         }
@@ -204,18 +208,16 @@ impl ProjectRepository {
     }
 }
 
-impl TryFrom<project::Model> for WebProject {
-    type Error = AppError;
-
-    fn try_from(value: project::Model) -> Result<Self, Self::Error> {
+impl WebProject {
+    pub fn from_model(value: project::Model, key: &OrganizationKey) -> Result<Self, AppError> {
         let sdk_encrypted = value.name_cipher.is_some();
         Ok(Self {
             id: Uuid::parse_str(&value.id).map_err(AppError::internal)?,
             name: match (value.name_plain, value.name_cipher) {
                 (Some(name), _) => name,
-                (_, Some(cipher)) => {
-                    sdk_crypto::decrypt(&cipher).unwrap_or_else(|_| "Encrypted SDK project".into())
-                }
+                (_, Some(cipher)) => key
+                    .decrypt(&cipher)
+                    .unwrap_or_else(|_| "Encrypted SDK project".into()),
                 _ => return Err(AppError::internal(anyhow::anyhow!("project name missing"))),
             },
             sdk_encrypted,

@@ -18,9 +18,12 @@ use uuid::Uuid;
 
 async fn database() -> (tempfile::TempDir, Database) {
     let data = tempfile::tempdir().expect("tempdir");
-    let db = Database::connect(&data.path().join("database-design.sqlite3"))
-        .await
-        .expect("database");
+    let db = Database::connect(
+        &data.path().join("database-design.sqlite3"),
+        organization_key(),
+    )
+    .await
+    .expect("database");
     (data, db)
 }
 
@@ -374,4 +377,8 @@ async fn every_table_enforces_its_storage_invariants() {
         .await
         .expect("foreign key check");
     assert!(foreign_key_violations.is_empty());
+}
+
+fn organization_key() -> lightbws::sdk_crypto::OrganizationKey {
+    lightbws::sdk_crypto::OrganizationKey::random().expect("organization key")
 }

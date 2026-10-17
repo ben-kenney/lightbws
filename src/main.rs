@@ -1,11 +1,7 @@
 use anyhow::{Context, Result};
 use lightbws::{
-    AppState,
-    config::Config,
-    create_app,
-    crypto::MasterKey,
-    db::Database,
-    domain::{machines::MachineRepository, users::UserRepository},
+    AppState, config::Config, create_app, crypto::MasterKey, db::Database,
+    domain::users::UserRepository, sdk_crypto::OrganizationKey,
 };
 use tokio::net::TcpListener;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
@@ -23,21 +19,10 @@ async fn main() -> Result<()> {
     tokio::fs::create_dir_all(&config.data_dir)
         .await
         .with_context(|| format!("failed to create {}", config.data_dir.display()))?;
-    let db = Database::connect(&config.database_path()).await?;
+    let organization_key = load_or_create_organization_key(&config).await?;
+    let db = Database::connect(&config.database_path(), organization_key).await?;
     let users = UserRepository::new(db.clone());
     users.bootstrap(config.bootstrap_admin.as_ref()).await?;
-    if config.upstream_compatibility_account {
-        let admin = users
-            .list()
-            .await?
-            .into_iter()
-            .find(|user| user.role == lightbws::domain::users::Role::Admin)
-            .context("administrator is missing")?;
-        MachineRepository::new(db.clone())
-            .ensure_compatibility_account(admin.id)
-            .await?;
-        tracing::warn!("publicly known upstream SDK test credentials are enabled");
-    }
     let master_key = MasterKey::load_or_create(&config)?;
     let state = AppState::new(db, &config).with_master_key(master_key);
     lightbws::domain::backups::recover_interrupted_jobs(&state.db).await?;
@@ -52,6 +37,28 @@ async fn main() -> Result<()> {
     .with_graceful_shutdown(shutdown())
     .await?;
     Ok(())
+}
+
+async fn load_or_create_organization_key(config: &Config) -> Result<OrganizationKey> {
+    let path = config.organization_key_path()?;
+    if path.exists() {
+        return OrganizationKey::load(&path);
+    }
+    if Database::has_organization_key(&config.database_path()).await? {
+        anyhow::bail!(
+            "organization keyfile {} is missing, but this database was encrypted with one; \
+             restore the keyfile (secrets cannot be decrypted without it)",
+            path.display()
+        );
+    }
+    let key = OrganizationKey::random()?;
+    key.write_new(&path)?;
+    tracing::warn!(
+        path = %path.display(),
+        "generated a new organization key; back up this file separately, losing it loses every \
+         stored secret"
+    );
+    Ok(key)
 }
 
 async fn shutdown() {

@@ -30,7 +30,7 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         let data = tempfile::tempdir().expect("tempdir");
-        let db = Database::connect(&data.path().join("access-api.sqlite3"))
+        let db = Database::connect(&data.path().join("access-api.sqlite3"), organization_key())
             .await
             .expect("database");
         UserRepository::new(db.clone())
@@ -54,8 +54,8 @@ impl Fixture {
             data_dir: data.path().into(),
             bootstrap_admin: None,
             cookie_secure: false,
-            upstream_compatibility_account: false,
             master_key: None,
+            organization_key_file: None,
             allow_plaintext_backups: false,
         };
         Self {
@@ -609,4 +609,8 @@ async fn response_json(response: axum::response::Response) -> Value {
         .expect("body")
         .to_bytes();
     serde_json::from_slice(&body).expect("json")
+}
+
+fn organization_key() -> lightbws::sdk_crypto::OrganizationKey {
+    lightbws::sdk_crypto::OrganizationKey::random().expect("organization key")
 }

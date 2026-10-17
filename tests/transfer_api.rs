@@ -32,9 +32,12 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         let data = tempfile::tempdir().expect("tempdir");
-        let db = Database::connect(&data.path().join("transfer-api.sqlite3"))
-            .await
-            .expect("database");
+        let db = Database::connect(
+            &data.path().join("transfer-api.sqlite3"),
+            organization_key(),
+        )
+        .await
+        .expect("database");
         UserRepository::new(db.clone())
             .create("admin", "Administrator", Role::Admin, "test-password-123")
             .await
@@ -48,9 +51,9 @@ impl Fixture {
             data_dir: data.path().into(),
             bootstrap_admin: None,
             cookie_secure: false,
-            upstream_compatibility_account: false,
             allow_plaintext_backups: false,
             master_key: None,
+            organization_key_file: None,
         };
         let master_key_text = "11".repeat(32);
         let master_key = MasterKey::parse(&master_key_text).expect("master key");
@@ -232,4 +235,8 @@ async fn response_bytes(response: axum::response::Response) -> Bytes {
         .await
         .expect("body")
         .to_bytes()
+}
+
+fn organization_key() -> lightbws::sdk_crypto::OrganizationKey {
+    lightbws::sdk_crypto::OrganizationKey::random().expect("organization key")
 }

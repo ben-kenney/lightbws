@@ -6,9 +6,12 @@ use sea_orm::ConnectionTrait;
 
 async fn database() -> (tempfile::TempDir, Database) {
     let data = tempfile::tempdir().expect("tempdir");
-    let db = Database::connect(&data.path().join("audit-retention.sqlite3"))
-        .await
-        .expect("database");
+    let db = Database::connect(
+        &data.path().join("audit-retention.sqlite3"),
+        organization_key(),
+    )
+    .await
+    .expect("database");
     (data, db)
 }
 
@@ -96,4 +99,8 @@ async fn automatic_cleanup_deletes_only_expired_events() {
             .last_cleanup_at
             .is_some()
     );
+}
+
+fn organization_key() -> lightbws::sdk_crypto::OrganizationKey {
+    lightbws::sdk_crypto::OrganizationKey::random().expect("organization key")
 }

@@ -21,8 +21,9 @@ contracts absent from the upstream fake server.
 8. `read` permits listing and retrieving the resource. `read + write` additionally permits creating,
    editing, and deleting secrets in the granted project.
 9. A machine with write access may create a project through the existing SDK endpoint; LightBWS
-   grants that machine read/write access to the new project. The explicit upstream compatibility
-   account retains full SDK behavior for local compatibility tests.
+   grants that machine read/write access to the new project. Existing compatibility accounts
+   keep full SDK behavior, but they can no longer be created with the upstream fixtures' published
+   credentials.
 10. Regular machine accounts start with no grants. Revocation and grant changes take effect without
     restarting LightBWS.
 11. LightBWS Web `admin` users manage organization users, groups, machines, projects, and policies.
@@ -40,8 +41,8 @@ grants. Effective access to a secret is the union of:
 - direct secret grants to the user or any group containing the user.
 
 For a machine account, effective secret access is the union of its project grant and direct secret
-grant. Organization Web admins have full management access. The upstream compatibility account has
-full SDK access but remains clearly identified as a compatibility/testing account.
+grant. Organization Web admins have full management access. A compatibility account has full SDK
+access but remains clearly identified as a compatibility/testing account.
 
 All list, get, batch, project-secret, and sync operations filter before serialization. All mutations
 authorize before modifying the database. Failed authorization returns `403` for a known authenticated

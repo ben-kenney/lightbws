@@ -7,7 +7,7 @@ backup objects are derived views.
 
 ## Normalized Model
 
-- `organizations` contains the single official SDK organization identity.
+- `organizations` contains the single official SDK organization identity and the check value that binds the database to its instance organization key.
 - `users`, `sessions`, `groups`, and `group_members` model human identity and group inheritance.
 - `projects` belongs to the organization; `secrets` belongs to exactly one project. A secret does not
   duplicate `organization_id`, so project and secret organization membership cannot diverge.
@@ -79,7 +79,7 @@ restoring the project preserves secrets that had already been individually delet
 
 | Table | Record role | Enforced invariants and primary access path |
 | --- | --- | --- |
-| `organizations` | SDK organization identity | Fixed-width identifier, bounded non-empty name, restricted project deletion |
+| `organizations` | SDK organization identity and organization-key check | Fixed-width identifier, bounded non-empty name, bounded key check, restricted project deletion |
 | `users` | Human identities | Case-insensitive username uniqueness, role/Boolean checks, monotonic account timestamps, active-admin lookup index |
 | `sessions` | Web bearer sessions | Digest-only identifiers, expiry after creation, user cascade, user and global expiry indexes |
 | `projects` | Secret grouping and policy boundary | Exactly one plaintext/ciphertext representation, organization FK, soft-delete timeline, organization/list index |

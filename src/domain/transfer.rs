@@ -30,6 +30,7 @@ use crate::{
         next_sdk_revision,
     },
     error::AppError,
+    sdk_crypto::{OrganizationKey, legacy},
 };
 
 const EXPORT_MAGIC: &[u8; 8] = b"LBWSX01\0";
@@ -114,6 +115,8 @@ pub fn inspect_archive(value: &[u8]) -> Result<ArchiveKind, AppError> {
 pub struct DatabaseDump {
     version: u8,
     exported_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sdk_transport_key: Option<String>,
     projects: Vec<ProjectRecord>,
     secrets: Vec<SecretRecord>,
 }
@@ -124,6 +127,15 @@ struct DatabaseDumpV3 {
     version: u8,
     exported_at: i64,
     scopes: BackupScopes,
+    /// SDK ciphertext in the archive is re-encrypted under this one-off key, so an archive is as
+    /// portable as its plaintext columns without exposing the source instance key. Archives
+    /// written before per-instance keys omit it and use the published legacy key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sdk_transport_key: Option<String>,
+    /// Identifies the source instance key. Machine access tokens wrap that key, so they only stay
+    /// usable when restored into an instance with the same key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    organization_key_fingerprint: Option<String>,
     projects: Vec<ProjectRecord>,
     secrets: Vec<SecretRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -217,6 +229,9 @@ pub struct ImportSummary {
     pub projects: usize,
     pub secrets: usize,
     pub full_instance: bool,
+    pub revoked_access_tokens: usize,
+    /// Well-formed SDK ciphertext the archive key could not decrypt, kept unchanged.
+    pub unreadable_sdk_values: usize,
 }
 
 pub async fn dump_database(db: &Database) -> Result<Vec<u8>, AppError> {
@@ -246,22 +261,14 @@ pub async fn dump_database(db: &Database) -> Result<Vec<u8>, AppError> {
             "database export exceeds the 64 MiB safety limit".into(),
         ));
     }
-    let projects = project::Entity::find()
-        .all(&transaction)
-        .await?
-        .into_iter()
-        .map(ProjectRecord::from)
-        .collect();
-    let secrets = secret::Entity::find()
-        .all(&transaction)
-        .await?
-        .into_iter()
-        .map(SecretRecord::from)
-        .collect();
+    let transport = transport_key()?;
+    let projects = export_projects(&transaction, db.organization_key(), &transport).await?;
+    let secrets = export_secrets(&transaction, db.organization_key(), &transport).await?;
     transaction.commit().await?;
     let serialized = serde_json::to_vec(&DatabaseDump {
         version: 1,
         exported_at: super::now(),
+        sdk_transport_key: Some(transport.to_base64()),
         projects,
         secrets,
     })
@@ -281,18 +288,9 @@ pub async fn dump_database_scoped(
 ) -> Result<Vec<u8>, AppError> {
     scopes.validate()?;
     let transaction = db.connection().begin().await?;
-    let projects = project::Entity::find()
-        .all(&transaction)
-        .await?
-        .into_iter()
-        .map(ProjectRecord::from)
-        .collect();
-    let secrets = secret::Entity::find()
-        .all(&transaction)
-        .await?
-        .into_iter()
-        .map(SecretRecord::from)
-        .collect();
+    let transport = transport_key()?;
+    let projects = export_projects(&transaction, db.organization_key(), &transport).await?;
+    let secrets = export_secrets(&transaction, db.organization_key(), &transport).await?;
     let users = optional_models::<user::Entity>(&transaction, scopes.identities).await?;
     let groups = optional_models::<group::Entity>(&transaction, scopes.identities).await?;
     let group_members =
@@ -368,6 +366,8 @@ pub async fn dump_database_scoped(
         version: 3,
         exported_at: super::now(),
         scopes,
+        sdk_transport_key: Some(transport.to_base64()),
+        organization_key_fingerprint: Some(db.organization_key().fingerprint()),
         projects,
         secrets,
         users,
@@ -429,6 +429,14 @@ pub async fn import_database(db: &Database, bytes: &[u8]) -> Result<ImportSummar
     }
     let project_count = dump.projects.len();
     let secret_count = dump.secrets.len();
+    let transport = parse_transport_key(dump.sdk_transport_key.as_deref())?;
+    let mut dump = dump;
+    let unreadable_sdk_values = import_ciphers(
+        &mut dump.projects,
+        &mut dump.secrets,
+        transport.as_ref(),
+        db.organization_key(),
+    )?;
     let transaction = db.connection().begin().await?;
     let import_revision = if secret_count == 0 {
         None
@@ -488,6 +496,8 @@ pub async fn import_database(db: &Database, bytes: &[u8]) -> Result<ImportSummar
         projects: project_count,
         secrets: secret_count,
         full_instance: false,
+        revoked_access_tokens: 0,
+        unreadable_sdk_values,
     })
 }
 
@@ -548,6 +558,29 @@ pub async fn import_database_scoped(
     }
     let project_count = dump.projects.len();
     let secret_count = dump.secrets.len();
+    let mut dump = dump;
+    let transport = parse_transport_key(dump.sdk_transport_key.as_deref())?;
+    let unreadable_sdk_values = import_ciphers(
+        &mut dump.projects,
+        &mut dump.secrets,
+        transport.as_ref(),
+        db.organization_key(),
+    )?;
+    let same_key = dump.organization_key_fingerprint.as_deref()
+        == Some(db.organization_key().fingerprint().as_str());
+    let mut revoked_access_tokens = 0;
+    let timestamp = super::now();
+    for token in dump.machine_access_tokens.iter_mut().flatten() {
+        // A token wraps its source instance key; elsewhere it could only hand out the wrong key.
+        if !same_key {
+            // Do not keep another instance's wrapped key material, even on a revoked token.
+            token.encrypted_payload = None;
+        }
+        if token.revoked_at.is_none() && token.encrypted_payload.is_none() {
+            token.revoked_at = Some(timestamp.max(token.created_at));
+            revoked_access_tokens += 1;
+        }
+    }
     let imported_token_ids = dump
         .machine_access_tokens
         .as_ref()
@@ -733,7 +766,152 @@ pub async fn import_database_scoped(
         projects: project_count,
         secrets: secret_count,
         full_instance: scopes.is_full_instance(),
+        revoked_access_tokens,
+        unreadable_sdk_values,
     })
+}
+
+fn transport_key() -> Result<OrganizationKey, AppError> {
+    OrganizationKey::random().map_err(AppError::internal)
+}
+
+fn parse_transport_key(value: Option<&str>) -> Result<Option<OrganizationKey>, AppError> {
+    value
+        .map(|value| {
+            OrganizationKey::parse(value)
+                .map_err(|_| AppError::Validation("invalid LightBWS export".into()))
+        })
+        .transpose()
+}
+
+async fn export_projects(
+    connection: &impl ConnectionTrait,
+    source: &OrganizationKey,
+    transport: &OrganizationKey,
+) -> Result<Vec<ProjectRecord>, AppError> {
+    let mut records = Vec::new();
+    for model in project::Entity::find().all(connection).await? {
+        let mut record = ProjectRecord::from(model);
+        record.name_cipher = export_cipher(record.name_cipher, source, transport)?;
+        records.push(record);
+    }
+    Ok(records)
+}
+
+async fn export_secrets(
+    connection: &impl ConnectionTrait,
+    source: &OrganizationKey,
+    transport: &OrganizationKey,
+) -> Result<Vec<SecretRecord>, AppError> {
+    let mut records = Vec::new();
+    for model in secret::Entity::find().all(connection).await? {
+        let mut record = SecretRecord::from(model);
+        record.key_cipher = export_cipher(record.key_cipher, source, transport)?;
+        record.value_cipher = export_cipher(record.value_cipher, source, transport)?;
+        record.note_cipher = export_cipher(record.note_cipher, source, transport)?;
+        records.push(record);
+    }
+    Ok(records)
+}
+
+/// Re-encrypts readable SDK ciphertext under the archive transport key. Opaque client
+/// ciphertext that the instance key cannot read is carried over unchanged.
+fn export_cipher(
+    value: Option<String>,
+    source: &OrganizationKey,
+    transport: &OrganizationKey,
+) -> Result<Option<String>, AppError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    match source.decrypt(&value) {
+        Ok(plaintext) => transport.encrypt(&plaintext).map(Some),
+        Err(_) => Ok(Some(value)),
+    }
+}
+
+fn import_ciphers(
+    projects: &mut [ProjectRecord],
+    secrets: &mut [SecretRecord],
+    transport: Option<&OrganizationKey>,
+    target: &OrganizationKey,
+) -> Result<usize, AppError> {
+    let mut unreadable = 0;
+    for record in projects {
+        record.name_cipher = import_cipher(
+            record.name_cipher.take(),
+            transport,
+            target,
+            &mut unreadable,
+        )?;
+    }
+    for record in secrets {
+        record.key_cipher =
+            import_cipher(record.key_cipher.take(), transport, target, &mut unreadable)?;
+        record.value_cipher = import_cipher(
+            record.value_cipher.take(),
+            transport,
+            target,
+            &mut unreadable,
+        )?;
+        record.note_cipher = import_cipher(
+            record.note_cipher.take(),
+            transport,
+            target,
+            &mut unreadable,
+        )?;
+    }
+    if unreadable > 0 {
+        tracing::warn!(
+            unreadable,
+            "imported SDK ciphertext that the archive key could not decrypt; those values are \
+             unreadable on this instance"
+        );
+    }
+    Ok(unreadable)
+}
+
+/// Re-encrypts archive ciphertext under the destination instance key. Archives without a
+/// transport key predate per-instance keys and were written under the published legacy key.
+/// Values that are not Bitwarden EncStrings at all (opaque client data) pass through silently;
+/// well-formed EncStrings that fail to decrypt also pass through but are counted.
+fn import_cipher(
+    value: Option<String>,
+    transport: Option<&OrganizationKey>,
+    target: &OrganizationKey,
+    unreadable: &mut usize,
+) -> Result<Option<String>, AppError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let plaintext = match transport {
+        Some(transport) => transport.decrypt(&value),
+        None => legacy::decrypt(&value),
+    };
+    match plaintext {
+        Ok(plaintext) => target.encrypt(&plaintext).map(Some),
+        Err(_) => {
+            if is_enc_string(&value) {
+                *unreadable += 1;
+            }
+            Ok(Some(value))
+        }
+    }
+}
+
+fn is_enc_string(value: &str) -> bool {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let Some(value) = value.strip_prefix("2.") else {
+        return false;
+    };
+    let parts = value.split('|').collect::<Vec<_>>();
+    matches!(
+        parts.as_slice(),
+        [iv, ciphertext, mac]
+            if STANDARD.decode(iv).is_ok_and(|iv| iv.len() == 16)
+                && STANDARD.decode(ciphertext).is_ok_and(|ct| !ct.is_empty() && ct.len() % 16 == 0)
+                && STANDARD.decode(mac).is_ok_and(|mac| mac.len() == 32)
+    )
 }
 
 async fn connection_delete(

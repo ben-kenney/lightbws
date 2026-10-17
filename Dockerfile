@@ -22,12 +22,14 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 65532 lightbws \
     && useradd --uid 65532 --gid lightbws --no-create-home --home-dir /data lightbws \
-    && install -d -o lightbws -g lightbws /data
+    && install -d -o lightbws -g lightbws /data \
+    && install -d -m 0700 -o lightbws -g lightbws /keys
 COPY --from=rust-builder /source/target/release/lightbws /usr/local/bin/lightbws
 USER 65532:65532
 ENV LIGHTBWS_BIND=0.0.0.0:8080 \
     LIGHTBWS_DATA_DIR=/data \
+    LIGHTBWS_ORGANIZATION_KEY_FILE=/keys/organization.key \
     LIGHTBWS_COOKIE_SECURE=false
-VOLUME ["/data"]
+VOLUME ["/data", "/keys"]
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/lightbws"]

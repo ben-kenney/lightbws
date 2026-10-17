@@ -29,11 +29,6 @@ use crate::{
     },
 };
 
-const ENCRYPTED_PAYLOAD: &str = concat!(
-    "2.E9fE8+M/VWMfhhim1KlCbQ==|eLsHR484S/tJbIkM6spnG/HP65tj9A6Tba7kAAvUp+rYuQmGLixiOCfMsqt5OvBctDfvvr/Aes",
-    "Bu7cZimPLyOEhqEAjn52jF0eaI38XZfeOG2VJl0LOf60Wkfh3ryAMvfvLj3G4ZCNYU8sNgoC2+IQ==|lNApuCQ4Pyakfo/wwuuajWNaEX/2MW8/3rjXB/V7n+k="
-);
-
 #[derive(Debug, Deserialize)]
 struct TokenRequest {
     grant_type: String,
@@ -49,7 +44,7 @@ struct TokenResponse {
     refresh_token: Option<String>,
     token_type: &'static str,
     scope: &'static str,
-    encrypted_payload: &'static str,
+    encrypted_payload: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -144,6 +139,7 @@ async fn token(
         )
         .await?;
     let (session_token, expires_at) = repository.create_session(&credential).await?;
+    let encrypted_payload = credential.encrypted_payload;
     let machine = credential.account;
     record_machine_event(
         &state,
@@ -160,7 +156,7 @@ async fn token(
         refresh_token: None,
         token_type: "Bearer",
         scope: "api.secrets",
-        encrypted_payload: ENCRYPTED_PAYLOAD,
+        encrypted_payload,
     }))
 }
 

@@ -24,9 +24,12 @@ fn access_token_id(access_token: &str) -> &str {
 #[tokio::test]
 async fn named_machine_tokens_authenticate_and_revoke_independently() {
     let data = tempfile::tempdir().expect("tempdir");
-    let db = Database::connect(&data.path().join("machine-tokens.sqlite3"))
-        .await
-        .expect("database");
+    let db = Database::connect(
+        &data.path().join("machine-tokens.sqlite3"),
+        organization_key(),
+    )
+    .await
+    .expect("database");
     let admin = UserRepository::new(db.clone())
         .create("admin", "Administrator", Role::Admin, "123456")
         .await
@@ -137,9 +140,12 @@ async fn named_machine_tokens_authenticate_and_revoke_independently() {
 #[tokio::test]
 async fn machine_token_expiry_must_be_in_the_future() {
     let data = tempfile::tempdir().expect("tempdir");
-    let db = Database::connect(&data.path().join("machine-token-expiry.sqlite3"))
-        .await
-        .expect("database");
+    let db = Database::connect(
+        &data.path().join("machine-token-expiry.sqlite3"),
+        organization_key(),
+    )
+    .await
+    .expect("database");
     let admin = UserRepository::new(db.clone())
         .create("admin", "Administrator", Role::Admin, "123456")
         .await
@@ -156,4 +162,8 @@ async fn machine_token_expiry_must_be_in_the_future() {
             .await
             .is_err()
     );
+}
+
+fn organization_key() -> lightbws::sdk_crypto::OrganizationKey {
+    lightbws::sdk_crypto::OrganizationKey::random().expect("organization key")
 }

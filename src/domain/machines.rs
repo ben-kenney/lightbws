@@ -17,9 +17,6 @@ use crate::{
     error::AppError,
 };
 
-pub const SDK_ENCRYPTION_KEY: &str = "X8vbvA0bduihIDe/qrzIQQ==";
-pub const UPSTREAM_CLIENT_ID: &str = "ec2c1d46-6a4b-4751-a310-af9601317f2d";
-pub const UPSTREAM_CLIENT_SECRET: &str = "C2IgxjjLF7qSshsbwe8JGcbM075YXw";
 pub const SDK_SESSION_TTL_SECONDS: i64 = 60 * 60;
 const MAX_ACTIVE_ACCESS_TOKENS: u64 = 100;
 
@@ -67,6 +64,7 @@ pub struct AuthenticatedMachineCredential {
     pub account: MachineAccount,
     pub token_id: Uuid,
     pub expires_at: Option<i64>,
+    pub encrypted_payload: String,
 }
 
 #[derive(Clone)]
@@ -77,45 +75,6 @@ pub struct MachineRepository {
 impl MachineRepository {
     pub fn new(db: Database) -> Self {
         Self { db }
-    }
-
-    pub async fn ensure_compatibility_account(&self, creator: Uuid) -> Result<(), AppError> {
-        let transaction = self.db.connection().begin().await?;
-        if machine_account::Entity::find()
-            .filter(machine_account::Column::ClientId.eq(UPSTREAM_CLIENT_ID))
-            .one(&transaction)
-            .await?
-            .is_some()
-        {
-            return Ok(());
-        }
-        let timestamp = now();
-        let account = machine_account::ActiveModel {
-            id: Set(Uuid::new_v4().to_string()),
-            name: Set("Official SDK compatibility".into()),
-            client_id: Set(UPSTREAM_CLIENT_ID.into()),
-            created_by: Set(creator.to_string()),
-            last_used_at: Set(None),
-            revoked_at: Set(None),
-            compatibility_account: Set(true),
-            created_at: Set(timestamp),
-        }
-        .insert(&transaction)
-        .await?;
-        machine_access_token::ActiveModel {
-            id: Set(UPSTREAM_CLIENT_ID.into()),
-            machine_account_id: Set(account.id),
-            name: Set("SDK compatibility".into()),
-            secret_digest: Set(digest(UPSTREAM_CLIENT_SECRET)),
-            expires_at: Set(None),
-            last_used_at: Set(None),
-            revoked_at: Set(None),
-            created_at: Set(timestamp),
-        }
-        .insert(&transaction)
-        .await?;
-        transaction.commit().await?;
-        Ok(())
     }
 
     pub async fn list(&self) -> Result<Vec<MachineAccount>, AppError> {
@@ -140,6 +99,7 @@ impl MachineRepository {
         let name = validate_name(name)?;
         let client_id = Uuid::new_v4();
         let secret = random_secret()?;
+        let wrapped = self.db.organization_key().wrap_for_access_token()?;
         let timestamp = now();
         let transaction = self.db.connection().begin().await?;
         let model = machine_account::ActiveModel {
@@ -170,13 +130,14 @@ impl MachineRepository {
             last_used_at: Set(None),
             revoked_at: Set(None),
             created_at: Set(timestamp),
+            encrypted_payload: Set(Some(wrapped.encrypted_payload)),
         }
         .insert(&transaction)
         .await?;
         transaction.commit().await?;
         Ok(IssuedMachineAccount {
             account: MachineAccount::try_from(model)?,
-            access_token: format!("0.{client_id}.{secret}:{SDK_ENCRYPTION_KEY}"),
+            access_token: format!("0.{client_id}.{secret}:{}", wrapped.access_key),
         })
     }
 
@@ -226,6 +187,10 @@ impl MachineRepository {
         if model.revoked_at.is_some() {
             return Err(AppError::Unauthorized);
         }
+        // Tokens minted before per-token key wrapping cannot receive the organization key.
+        let Some(encrypted_payload) = token.encrypted_payload.clone() else {
+            return Err(AppError::Unauthorized);
+        };
         if candidate
             .as_bytes()
             .ct_eq(token.secret_digest.as_bytes())
@@ -246,6 +211,7 @@ impl MachineRepository {
             account: MachineAccount::try_from(account)?,
             token_id: Uuid::parse_str(&token.id).map_err(AppError::internal)?,
             expires_at: token.expires_at,
+            encrypted_payload,
         })
     }
 
@@ -342,7 +308,7 @@ impl MachineRepository {
             .one(self.db.connection())
             .await?
             .ok_or(AppError::NotFound)?;
-        if model.client_id == UPSTREAM_CLIENT_ID {
+        if model.compatibility_account {
             return Err(AppError::Conflict);
         }
         model.delete(self.db.connection()).await?;
@@ -389,6 +355,7 @@ impl MachineRepository {
             ));
         }
         let secret = random_secret()?;
+        let wrapped = self.db.organization_key().wrap_for_access_token()?;
         let model = machine_access_token::ActiveModel {
             id: Set(Uuid::new_v4().to_string()),
             machine_account_id: Set(machine_id.to_string()),
@@ -398,6 +365,7 @@ impl MachineRepository {
             last_used_at: Set(None),
             revoked_at: Set(None),
             created_at: Set(timestamp),
+            encrypted_payload: Set(Some(wrapped.encrypted_payload)),
         }
         .insert(self.db.connection())
         .await
@@ -410,7 +378,7 @@ impl MachineRepository {
         })?;
         let token = MachineAccessToken::try_from(model)?;
         Ok(IssuedMachineAccessToken {
-            access_token: format!("0.{}.{}:{SDK_ENCRYPTION_KEY}", token.id, secret),
+            access_token: format!("0.{}.{}:{}", token.id, secret, wrapped.access_key),
             token,
         })
     }

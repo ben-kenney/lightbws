@@ -12,7 +12,7 @@ use crate::{
     },
     domain::{access::Permission, next_sdk_revision, now},
     error::AppError,
-    sdk_crypto,
+    sdk_crypto::OrganizationKey,
 };
 
 #[derive(Clone, Debug, Serialize)]
@@ -102,7 +102,7 @@ impl SecretRepository {
         .insert(&transaction)
         .await?;
         transaction.commit().await?;
-        WebSecret::try_from(model)
+        WebSecret::from_model(model, self.db.organization_key())
     }
 
     pub async fn create_web(
@@ -121,13 +121,13 @@ impl SecretRepository {
         if sdk_encrypted {
             let model = self
                 .create_cipher(
-                    sdk_crypto::encrypt(key.trim())?,
-                    sdk_crypto::encrypt(value)?,
-                    sdk_crypto::encrypt(note)?,
+                    self.db.organization_key().encrypt(key.trim())?,
+                    self.db.organization_key().encrypt(value)?,
+                    self.db.organization_key().encrypt(note)?,
                     project_id,
                 )
                 .await?;
-            WebSecret::try_from(model)
+            WebSecret::from_model(model, self.db.organization_key())
         } else {
             self.create_plain(key, value, note, project_id).await
         }
@@ -199,7 +199,7 @@ impl SecretRepository {
         active.revision_nanos = Set(revision_nanos);
         let model = active.update(&transaction).await?;
         transaction.commit().await?;
-        WebSecret::try_from(model)
+        WebSecret::from_model(model, self.db.organization_key())
     }
 
     pub async fn update_web(
@@ -221,13 +221,13 @@ impl SecretRepository {
             let model = self
                 .update_cipher(
                     id,
-                    sdk_crypto::encrypt(key.trim())?,
-                    sdk_crypto::encrypt(value)?,
-                    sdk_crypto::encrypt(note)?,
+                    self.db.organization_key().encrypt(key.trim())?,
+                    self.db.organization_key().encrypt(value)?,
+                    self.db.organization_key().encrypt(note)?,
                     project_id,
                 )
                 .await?;
-            WebSecret::try_from(model)
+            WebSecret::from_model(model, self.db.organization_key())
         } else {
             self.update_plain(id, key, value, note, project_id).await
         }
@@ -321,10 +321,8 @@ impl SecretRepository {
     }
 }
 
-impl TryFrom<secret::Model> for WebSecret {
-    type Error = AppError;
-
-    fn try_from(value: secret::Model) -> Result<Self, Self::Error> {
+impl WebSecret {
+    pub fn from_model(value: secret::Model, key: &OrganizationKey) -> Result<Self, AppError> {
         let sdk_encrypted = value.key_cipher.is_some();
         Ok(Self {
             id: Uuid::parse_str(&value.id).map_err(AppError::internal)?,
@@ -334,19 +332,19 @@ impl TryFrom<secret::Model> for WebSecret {
                 .transpose()?,
             key: match (value.key_plain, value.key_cipher) {
                 (Some(key), _) => key,
-                (_, Some(cipher)) => {
-                    sdk_crypto::decrypt(&cipher).unwrap_or_else(|_| "Encrypted SDK secret".into())
-                }
+                (_, Some(cipher)) => key
+                    .decrypt(&cipher)
+                    .unwrap_or_else(|_| "Encrypted SDK secret".into()),
                 _ => return Err(AppError::internal(anyhow::anyhow!("secret key missing"))),
             },
             value: match (value.value_plain, value.value_cipher) {
                 (Some(value), _) => Some(value),
-                (_, Some(cipher)) => sdk_crypto::decrypt(&cipher).ok(),
+                (_, Some(cipher)) => key.decrypt(&cipher).ok(),
                 _ => None,
             },
             note: match (value.note_plain, value.note_cipher) {
                 (Some(note), _) => note,
-                (_, Some(cipher)) => sdk_crypto::decrypt(&cipher).unwrap_or_default(),
+                (_, Some(cipher)) => key.decrypt(&cipher).unwrap_or_default(),
                 _ => String::new(),
             },
             sdk_encrypted,
