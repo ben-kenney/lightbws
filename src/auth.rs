@@ -1,5 +1,5 @@
 use std::{
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     time::{Duration, Instant},
 };
 
@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 use crate::{
     AppState,
+    client_ip::{self, FailureReason, LoginKind},
     db::entities::session,
     domain::{
         now,
@@ -77,15 +78,28 @@ pub async fn config(State(state): State<AppState>) -> Result<Json<AuthConfig>, A
 pub async fn login(
     State(state): State<AppState>,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    request_headers: HeaderMap,
     Json(input): Json<LoginInput>,
 ) -> Result<impl IntoResponse, AppError> {
-    let rate_key = login_rate_key(&input.username, peer.as_ref().map(|peer| peer.0.0));
-    check_login_rate(&state, &rate_key).await?;
+    let client = client_ip::resolve(
+        &request_headers,
+        peer.map(|peer| peer.0.0),
+        state.ip_header.as_ref(),
+    );
+    let refuse = |reason| {
+        client_ip::log_login_failure(LoginKind::Web, client, reason, &input.username);
+    };
+    let rate_key = login_rate_key(&input.username, client);
+    if let Err(error) = check_login_rate(&state, &rate_key).await {
+        refuse(FailureReason::RateLimited);
+        return Err(error);
+    }
     let repository = UserRepository::new(state.db.clone());
     let model = match repository.find_login(&input.username).await {
         Ok(model) => model,
         Err(_) => {
             record_login_failure(&state, &rate_key).await;
+            refuse(FailureReason::InvalidCredentials);
             return Err(AppError::Unauthorized);
         }
     };
@@ -96,6 +110,7 @@ pub async fn login(
         .map_err(AppError::internal)?;
     if !valid || model.disabled {
         record_login_failure(&state, &rate_key).await;
+        refuse(FailureReason::InvalidCredentials);
         return Err(AppError::Unauthorized);
     }
     clear_login_failures(&state, &rate_key).await;
@@ -291,11 +306,11 @@ fn digest(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
 }
 
-fn login_rate_key(username: &str, peer: Option<SocketAddr>) -> String {
+fn login_rate_key(username: &str, client: Option<IpAddr>) -> String {
     format!(
         "{}|{}",
         username.trim().to_lowercase(),
-        peer.map_or_else(|| "unknown".into(), |peer| peer.ip().to_string())
+        client.map_or_else(|| "unknown".into(), |client| client.to_string())
     )
 }
 

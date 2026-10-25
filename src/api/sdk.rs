@@ -1,6 +1,8 @@
+use std::net::SocketAddr;
+
 use axum::{
-    Form, Json, Router,
-    extract::{FromRequestParts, Path, Query, State},
+    Extension, Form, Json, Router,
+    extract::{ConnectInfo, FromRequestParts, Path, Query, State},
     http::{HeaderMap, StatusCode, request::Parts},
     routing::{get, post},
 };
@@ -12,6 +14,7 @@ use uuid::Uuid;
 
 use crate::{
     AppState,
+    client_ip::{self, FailureReason, LoginKind},
     db::entities::{sdk_sync_state, secret},
     domain::{
         ORGANIZATION_ID,
@@ -118,7 +121,30 @@ pub fn routes() -> Router<AppState> {
 
 async fn token(
     State(state): State<AppState>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    request_headers: HeaderMap,
     Form(payload): Form<TokenRequest>,
+) -> Result<Json<TokenResponse>, AppError> {
+    let result = exchange_token(&state, &payload).await;
+    if matches!(result, Err(AppError::Unauthorized)) {
+        let client = client_ip::resolve(
+            &request_headers,
+            peer.map(|peer| peer.0.0),
+            state.ip_header.as_ref(),
+        );
+        client_ip::log_login_failure(
+            LoginKind::Machine,
+            client,
+            FailureReason::InvalidCredentials,
+            payload.client_id.as_deref().unwrap_or_default(),
+        );
+    }
+    result
+}
+
+async fn exchange_token(
+    state: &AppState,
+    payload: &TokenRequest,
 ) -> Result<Json<TokenResponse>, AppError> {
     if payload.grant_type != "client_credentials"
         || payload
@@ -142,7 +168,7 @@ async fn token(
     let encrypted_payload = credential.encrypted_payload;
     let machine = credential.account;
     record_machine_event(
-        &state,
+        state,
         &machine,
         "machine.login",
         "machine",

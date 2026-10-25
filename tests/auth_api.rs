@@ -1,7 +1,7 @@
 use axum::{
     Router,
     body::Body,
-    http::{Method, Request, StatusCode, header},
+    http::{HeaderName, Method, Request, StatusCode, header},
 };
 use http_body_util::BodyExt;
 use lightbws::{
@@ -22,6 +22,10 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_ip_header(None).await
+    }
+
+    async fn with_ip_header(ip_header: Option<HeaderName>) -> Self {
         let data = tempfile::tempdir().expect("tempdir");
         let db = Database::connect(&data.path().join("auth.sqlite3"), organization_key())
             .await
@@ -37,6 +41,8 @@ impl Fixture {
             cookie_secure: false,
             master_key: None,
             organization_key_file: None,
+            ip_header,
+            log_file: None,
             allow_plaintext_backups: false,
         };
         let state = AppState::new(db, &config);
@@ -181,6 +187,39 @@ async fn repeated_invalid_logins_are_rate_limited_without_account_disclosure() {
         .await;
     assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(limited.headers()[header::RETRY_AFTER], "60");
+}
+
+#[tokio::test]
+async fn rate_limit_follows_the_configured_client_ip_header() {
+    let fixture = Fixture::with_ip_header(Some(HeaderName::from_static("x-real-ip"))).await;
+    let attempt = |client: &'static str, password: &'static str| {
+        let mut request = json_request(
+            Method::POST,
+            "/api/v1/auth/login",
+            json!({ "username": "admin", "password": password }),
+            None,
+            None,
+        );
+        request
+            .headers_mut()
+            .insert("x-real-ip", client.parse().unwrap());
+        fixture.request(request)
+    };
+    for _ in 0..8 {
+        assert_eq!(
+            attempt("198.51.100.1", "wrong-password").await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(
+        attempt("198.51.100.1", "test-password-123").await.status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    // Another client behind the same proxy is not locked out.
+    assert_eq!(
+        attempt("198.51.100.2", "test-password-123").await.status(),
+        StatusCode::OK
+    );
 }
 
 fn json_request(

@@ -1,5 +1,6 @@
 pub mod api;
 pub mod auth;
+pub mod client_ip;
 pub mod config;
 pub mod crypto;
 pub mod db;
@@ -38,6 +39,7 @@ pub struct AppState {
     pub backup_permits: Arc<Semaphore>,
     pub master_key: MasterKey,
     pub allow_plaintext_backups: bool,
+    pub(crate) ip_header: Option<HeaderName>,
 }
 
 impl AppState {
@@ -49,6 +51,7 @@ impl AppState {
             backup_permits: Arc::new(Semaphore::new(1)),
             master_key: MasterKey::random().expect("operating system random source"),
             allow_plaintext_backups: config.allow_plaintext_backups,
+            ip_header: config.ip_header.clone(),
         }
     }
 

@@ -125,6 +125,8 @@ The remaining values are passed into the LightBWS container:
 | `LIGHTBWS_COOKIE_SECURE` | `false` | Require HTTPS for Web session cookies. Enable behind an HTTPS reverse proxy. |
 | `LIGHTBWS_MASTER_KEY` | generated | Base64url or hexadecimal 32-byte key used to encrypt stored backup credentials and automatic backup archives. |
 | `LIGHTBWS_ALLOW_PLAINTEXT_BACKUPS` | `false` | Unlock plaintext as an explicit per-export or per-target option. Encrypted mode remains the default. |
+| `LIGHTBWS_IP_HEADER` | none | Header that carries the client address behind a reverse proxy, such as `X-Real-IP`. Used for failed-login logs and the login rate limit. Only set it when every request comes through that proxy. See [fail2ban](docs/fail2ban.md). |
+| `LIGHTBWS_LOG_FILE` | none | Also append plain-text logs to this file, for example for fail2ban. |
 | `RUST_LOG` | `lightbws=info,tower_http=info` | Structured log filter. |
 
 The image already sets `LIGHTBWS_BIND=0.0.0.0:8080` and `LIGHTBWS_DATA_DIR=/data`. Native binary deployments can override both runtime variables; Compose normally changes the host mapping through `LIGHTBWS_LISTEN_ADDRESS` and `LIGHTBWS_PORT` instead.
@@ -291,6 +293,7 @@ The authorization acceptance test uses the same `fnox.toml` throughout:
 - [BWS CLI](https://github.com/bitwarden/sdk-sm/tree/main/crates/bws)
 - [Fnox Bitwarden Secrets Manager provider](https://fnox.jdx.dev/providers/bitwarden-sm)
 - [Bitwarden Secrets Manager help](https://bitwarden.com/help/secrets-manager-overview/)
+- [fail2ban](docs/fail2ban.md): every refused Web or SDK login is logged with the client address, and `contrib/fail2ban` has a ready filter and jail.
 
 ## Development
 

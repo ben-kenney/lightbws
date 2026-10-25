@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use axum::http::HeaderName;
 use secrecy::SecretString;
 
 #[derive(Clone)]
@@ -21,6 +22,10 @@ pub struct Config {
     pub allow_plaintext_backups: bool,
     pub master_key: Option<SecretString>,
     pub organization_key_file: Option<PathBuf>,
+    /// Request header that carries the client address set by a trusted reverse proxy.
+    pub ip_header: Option<HeaderName>,
+    /// Optional file that receives a plain-text copy of the log, for tools such as fail2ban.
+    pub log_file: Option<PathBuf>,
 }
 
 impl Config {
@@ -51,6 +56,10 @@ impl Config {
         let allow_plaintext_backups = parse_bool("LIGHTBWS_ALLOW_PLAINTEXT_BACKUPS", false)?;
         let master_key = env_value("LIGHTBWS_MASTER_KEY").map(SecretString::from);
         let organization_key_file = env_value("LIGHTBWS_ORGANIZATION_KEY_FILE").map(PathBuf::from);
+        let ip_header = env_value("LIGHTBWS_IP_HEADER")
+            .map(|name| parse_ip_header(&name))
+            .transpose()?;
+        let log_file = env_value("LIGHTBWS_LOG_FILE").map(PathBuf::from);
         Ok(Self {
             bind,
             data_dir,
@@ -59,6 +68,8 @@ impl Config {
             allow_plaintext_backups,
             master_key,
             organization_key_file,
+            ip_header,
+            log_file,
         })
     }
 
@@ -130,6 +141,10 @@ pub fn validate_password(value: &str) -> Result<&str> {
     Ok(value)
 }
 
+pub fn parse_ip_header(value: &str) -> Result<HeaderName> {
+    HeaderName::try_from(value.trim()).context("LIGHTBWS_IP_HEADER is not a valid header name")
+}
+
 fn env_value(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -160,13 +175,15 @@ impl std::fmt::Debug for Config {
                 &self.master_key.as_ref().map(|_| "[REDACTED]"),
             )
             .field("organization_key_file", &self.organization_key_file)
+            .field("ip_header", &self.ip_header)
+            .field("log_file", &self.log_file)
             .finish()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, validate_password, validate_username};
+    use super::{Config, parse_ip_header, validate_password, validate_username};
 
     #[test]
     fn validates_bootstrap_credentials() {
@@ -175,6 +192,15 @@ mod tests {
         assert!(validate_username("bad\nname").is_err());
         assert!(validate_password("123456").is_ok());
         assert!(validate_password("12345").is_err());
+    }
+
+    #[test]
+    fn parses_the_client_ip_header() {
+        assert_eq!(
+            parse_ip_header(" X-Real-IP ").unwrap().as_str(),
+            "x-real-ip"
+        );
+        assert!(parse_ip_header("not a header").is_err());
     }
 
     #[test]
@@ -190,6 +216,8 @@ mod tests {
             allow_plaintext_backups: false,
             master_key: None,
             organization_key_file: key,
+            ip_header: None,
+            log_file: None,
         };
         assert!(config(None).organization_key_path().is_err());
         assert!(

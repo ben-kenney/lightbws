@@ -40,6 +40,8 @@ fn config(data: &tempfile::TempDir) -> Config {
         allow_plaintext_backups: false,
         master_key: None,
         organization_key_file: None,
+        ip_header: None,
+        log_file: None,
     }
 }
 

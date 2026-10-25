@@ -125,6 +125,8 @@ export LIGHTBWS_ADMIN_PASSWORD='replace-with-a-long-password'
 | `LIGHTBWS_COOKIE_SECURE` | `false` | 要求 Web 会话 Cookie 只通过 HTTPS 传输。使用 HTTPS 反向代理时启用。 |
 | `LIGHTBWS_MASTER_KEY` | 自动生成 | 用于加密存储备份凭据和自动备份归档的 Base64url 或十六进制 32 字节密钥。 |
 | `LIGHTBWS_ALLOW_PLAINTEXT_BACKUPS` | `false` | 允许在单次导出或备份目标中显式选择明文模式，加密模式仍为默认值。 |
+| `LIGHTBWS_IP_HEADER` | 无 | 反向代理传递客户端地址的请求头，例如 `X-Real-IP`。用于登录失败日志和登录限流。仅在所有请求都经过该代理时设置。参见 [fail2ban](docs/fail2ban.md)。 |
+| `LIGHTBWS_LOG_FILE` | 无 | 额外将纯文本日志追加写入此文件，例如供 fail2ban 读取。 |
 | `RUST_LOG` | `lightbws=info,tower_http=info` | 结构化日志过滤器。 |
 
 镜像已经设置 `LIGHTBWS_BIND=0.0.0.0:8080` 和 `LIGHTBWS_DATA_DIR=/data`。原生二进制部署可以覆盖这两个运行时变量；Compose 部署通常应通过 `LIGHTBWS_LISTEN_ADDRESS` 和 `LIGHTBWS_PORT` 调整宿主机映射。
@@ -291,6 +293,7 @@ fnox exec -- npm start
 - [BWS CLI](https://github.com/bitwarden/sdk-sm/tree/main/crates/bws)
 - [Fnox Bitwarden Secrets Manager provider](https://fnox.jdx.dev/providers/bitwarden-sm)
 - [Bitwarden Secrets Manager 帮助文档](https://bitwarden.com/help/secrets-manager-overview/)
+- [fail2ban](docs/fail2ban.md)：每次被拒绝的 Web 或 SDK 登录都会记录客户端地址，`contrib/fail2ban` 提供现成的过滤器和 jail。
 
 ## 开发
 

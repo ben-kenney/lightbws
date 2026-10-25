@@ -1,0 +1,21 @@
+# fail2ban jail for LightBWS. Copy to /etc/fail2ban/jail.d/ and adjust logpath or backend.
+# See docs/fail2ban.md for Docker, journald and reverse proxy setups.
+
+[lightbws]
+enabled = true
+filter = lightbws
+port = 80,443
+# Option 1: the plain-text log file written when LIGHTBWS_LOG_FILE is set.
+logpath = /var/log/lightbws/lightbws.log
+backend = auto
+# Option 2: journald, for a systemd service or Docker's journald log driver.
+# Comment out logpath above and use one of these instead:
+# backend = systemd
+# journalmatch = _SYSTEMD_UNIT=lightbws.service
+# journalmatch = CONTAINER_NAME=lightbws
+maxretry = 5
+findtime = 10m
+bantime = 1h
+# When the published port is handled by Docker and no reverse proxy runs on the host, ban in the
+# DOCKER-USER chain, because Docker traffic bypasses the INPUT chain:
+# action = iptables-allports[name=lightbws, chain=DOCKER-USER]
