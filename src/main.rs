@@ -40,6 +40,17 @@ async fn main() -> Result<()> {
 fn init_logging(config: &Config) -> Result<()> {
     let file_layer = match &config.log_file {
         Some(path) => {
+            if let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!(
+                        "failed to create parent directory for LIGHTBWS_LOG_FILE {}",
+                        path.display()
+                    )
+                })?;
+            }
             let file = OpenOptions::new()
                 .create(true)
                 .append(true)

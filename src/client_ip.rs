@@ -13,16 +13,16 @@ const MAX_LOGGED_IDENTIFIER: usize = 64;
 /// Returns the address of the client that sent the request.
 ///
 /// When `ip_header` is set (for example `X-Real-IP` behind a reverse proxy), its value wins. For a
-/// comma-separated list such as `X-Forwarded-For`, the last entry is used: it is the one added by
-/// the proxy closest to LightBWS, while earlier entries can be forged by the client. Without the
-/// header, or when it does not hold an address, the TCP peer address is used.
+/// comma-separated list or repeated header such as `X-Forwarded-For`, the last entry is used: it
+/// is the one added by the proxy closest to LightBWS, while earlier entries can be forged by the
+/// client. Without the header, or when it does not hold an address, the TCP peer address is used.
 pub fn resolve(
     headers: &HeaderMap,
     peer: Option<SocketAddr>,
     ip_header: Option<&HeaderName>,
 ) -> Option<IpAddr> {
     ip_header
-        .and_then(|name| headers.get(name))
+        .and_then(|name| headers.get_all(name).iter().next_back())
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.rsplit(',').next())
         .and_then(parse_address)
@@ -36,6 +36,12 @@ fn parse_address(value: &str) -> Option<IpAddr> {
         .parse::<IpAddr>()
         .ok()
         .or_else(|| value.parse::<SocketAddr>().ok().map(|address| address.ip()))
+        .or_else(|| {
+            value
+                .strip_prefix('[')
+                .and_then(|value| value.strip_suffix(']'))
+                .and_then(|value| value.parse::<IpAddr>().ok())
+        })
 }
 
 /// Which login endpoint a failure came from.
@@ -145,6 +151,10 @@ mod tests {
             ),
             Some(IpAddr::V6("2001:db8::1".parse::<Ipv6Addr>().unwrap()))
         );
+        assert_eq!(
+            resolve(&headers("x-real-ip", "[2001:db8::1]"), peer(), Some(&name)),
+            Some(IpAddr::V6("2001:db8::1".parse::<Ipv6Addr>().unwrap()))
+        );
     }
 
     #[test]
@@ -153,6 +163,13 @@ mod tests {
         let value = headers("x-forwarded-for", "203.0.113.99, 198.51.100.1");
         assert_eq!(
             resolve(&value, peer(), Some(&name)),
+            Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)))
+        );
+        let mut repeated = HeaderMap::new();
+        repeated.append("x-forwarded-for", HeaderValue::from_static("203.0.113.99"));
+        repeated.append("x-forwarded-for", HeaderValue::from_static("198.51.100.1"));
+        assert_eq!(
+            resolve(&repeated, peer(), Some(&name)),
             Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)))
         );
     }
