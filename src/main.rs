@@ -1,3 +1,5 @@
+use std::{fs::OpenOptions, io::IsTerminal, sync::Mutex};
+
 use anyhow::{Context, Result};
 use lightbws::{
     AppState, config::Config, create_app, crypto::MasterKey, db::Database,
@@ -8,14 +10,8 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
-        .with(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "lightbws=info,tower_http=info".into()),
-        )
-        .init();
     let config = Config::from_env()?;
+    init_logging(&config)?;
     tokio::fs::create_dir_all(&config.data_dir)
         .await
         .with_context(|| format!("failed to create {}", config.data_dir.display()))?;
@@ -36,6 +32,46 @@ async fn main() -> Result<()> {
     )
     .with_graceful_shutdown(shutdown())
     .await?;
+    Ok(())
+}
+
+/// Logs to standard output, plus an optional plain-text file. Color codes are only used on a
+/// terminal, so that `docker logs`, journald and fail2ban see plain lines.
+fn init_logging(config: &Config) -> Result<()> {
+    let file_layer = match &config.log_file {
+        Some(path) => {
+            if let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!(
+                        "failed to create parent directory for LIGHTBWS_LOG_FILE {}",
+                        path.display()
+                    )
+                })?;
+            }
+            let file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .with_context(|| format!("failed to open LIGHTBWS_LOG_FILE {}", path.display()))?;
+            Some(
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_writer(Mutex::new(file)),
+            )
+        }
+        None => None,
+    };
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_ansi(std::io::stdout().is_terminal()))
+        .with(file_layer)
+        .with(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "lightbws=info,tower_http=info".into()),
+        )
+        .init();
     Ok(())
 }
 

@@ -54,6 +54,8 @@ impl Fixture {
             allow_plaintext_backups: false,
             master_key: None,
             organization_key_file: None,
+            ip_header: None,
+            log_file: None,
         };
         let master_key_text = "11".repeat(32);
         let master_key = MasterKey::parse(&master_key_text).expect("master key");

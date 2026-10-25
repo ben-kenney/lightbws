@@ -12,6 +12,8 @@ services:
       LIGHTBWS_ADMIN_PASSWORD: "${LIGHTBWS_ADMIN_PASSWORD:?Set LIGHTBWS_ADMIN_PASSWORD in .env}"
       LIGHTBWS_COOKIE_SECURE: "${LIGHTBWS_COOKIE_SECURE:-false}"
       LIGHTBWS_MASTER_KEY: "${LIGHTBWS_MASTER_KEY:-}"
+      LIGHTBWS_IP_HEADER: "${LIGHTBWS_IP_HEADER:-}"
+      LIGHTBWS_LOG_FILE: "${LIGHTBWS_LOG_FILE:-}"
       RUST_LOG: "${RUST_LOG:-lightbws=info,tower_http=info}"
     volumes:
       - lightbws-data:/data

@@ -61,6 +61,8 @@ impl Fixture {
             cookie_secure: false,
             master_key: None,
             organization_key_file: None,
+            ip_header: None,
+            log_file: None,
             allow_plaintext_backups: false,
         };
         Self {
