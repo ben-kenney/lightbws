@@ -43,6 +43,7 @@ Use LightBWS for workloads such as injecting a database URL into a service, supp
 - Administrator bootstrap from environment variables, Web user management, and groups.
 - Project and direct-secret grants for users, groups, and machine accounts with read or read/write access.
 - Projects, secrets, machine accounts, soft-delete trash, and one-time access-token display.
+- Bounded per-secret version history, so an accidental edit from the Web UI or an SDK client can be reviewed and undone.
 - Audit collection controls with automatic retention cleanup, manual clearing, and a full off switch.
 - Cookie sessions, CSRF protection, Argon2id passwords, encrypted backup credentials, and hardened response headers.
 - Chinese and English UI with seven built-in Astryx themes and system, light, and dark color modes.
@@ -127,6 +128,7 @@ The remaining values are passed into the LightBWS container:
 | `LIGHTBWS_ALLOW_PLAINTEXT_BACKUPS` | `false` | Unlock plaintext as an explicit per-export or per-target option. Encrypted mode remains the default. |
 | `LIGHTBWS_IP_HEADER` | none | Header that carries the client address behind a reverse proxy, such as `X-Real-IP`. Used for failed-login logs and the login rate limit. Only set it when every request comes through that proxy. See [fail2ban](docs/fail2ban.md). |
 | `LIGHTBWS_LOG_FILE` | none | Also append plain-text logs to this file, for example for fail2ban. |
+| `LIGHTBWS_SECRET_HISTORY_LIMIT` | `20` | Earlier versions kept per secret, from `0` to `1000`. `0` stops recording new versions without deleting existing history. See [Secret version history](#secret-version-history). |
 | `RUST_LOG` | `lightbws=info,tower_http=info` | Structured log filter. |
 
 The image already sets `LIGHTBWS_BIND=0.0.0.0:8080` and `LIGHTBWS_DATA_DIR=/data`. Native binary deployments can override both runtime variables; Compose normally changes the host mapping through `LIGHTBWS_LISTEN_ADDRESS` and `LIGHTBWS_PORT` instead.
@@ -208,6 +210,18 @@ LightBWS follows the Bitwarden Secrets Manager model. It has one organization bo
 
 Administrators manage users, groups, machine accounts, projects, and grants. Members see only the projects and secrets they can read. Write controls whether they can create, edit, move, or delete secrets. Group membership is evaluated on every request, so permission changes take effect without restarting the server or client.
 
+## Secret version history
+
+Changing a secret's key, value, or note keeps the content that was replaced. This covers edits in the Web UI, edits by SDK clients such as `bws secret edit`, and imports that overwrite an existing secret. Moving a secret between projects, or saving it without changing anything, does not create a version.
+
+- Open **Version history** on a secret to see when each version was replaced, by whom, and which fields changed. The list never contains values; showing one version fetches it on request and writes a `secret.version.read` audit event.
+- **Restore this version** needs write access to the secret. It restores the key, value, and note only, leaves the project and access policy alone, and keeps the content it replaces as a new version, so a restore can itself be undone. SDK clients see the restored value on their next sync.
+- Viewing history needs read access to the secret. Administrators can clear one secret's history without deleting the secret.
+- Each secret keeps its newest `LIGHTBWS_SECRET_HISTORY_LIMIT` versions (20 by default); older ones are dropped as new ones are recorded. Moving a secret to the trash keeps its history; deleting it permanently deletes the history too.
+- History is stored exactly like current secrets, encrypted under the organization key, and travels with secrets in backups and exports.
+
+History contains old secret values. Rotating a leaked secret does not remove the leaked value from history until it ages out or an administrator clears that secret's history.
+
 ## Audit log
 
 Administrators can manage audit retention from the Web UI:
@@ -272,7 +286,7 @@ The authorization acceptance test uses the same `fnox.toml` throughout:
 
 ## Backups and transfer
 
-- The default backup scope contains projects and secrets only. Optional scopes add users/groups/memberships, machine accounts, access policies, audit settings/events, and backup target configuration/credentials. The full-instance preset includes every persistent scope and can rebuild the durable database.
+- The default backup scope contains projects and secrets (with their version history) only. Optional scopes add users/groups/memberships, machine accounts, access policies, audit settings/events, and backup target configuration/credentials. The full-instance preset includes every persistent scope and can rebuild the durable database.
 - Sessions, machine sessions, backup-job history, migration metadata, SQLite WAL state, and `master.key` are never included in an archive.
 - Manual encrypted exports use an independent passphrase-derived Argon2id key and are portable between LightBWS installations. Import them with the same passphrase.
 - The organization keyfile is never included in an archive. Archives re-encrypt project names and Secrets under a one-off key stored inside the (encrypted) archive, and import re-encrypts them under the destination's organization key. Archives from 0.2.6 and earlier are re-encrypted from the published legacy key on import.

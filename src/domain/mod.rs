@@ -4,6 +4,7 @@ pub mod backups;
 pub mod groups;
 pub mod machines;
 pub mod projects;
+pub mod secret_history;
 pub mod secrets;
 pub mod transfer;
 pub mod users;

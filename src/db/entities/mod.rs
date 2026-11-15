@@ -18,5 +18,6 @@ pub mod secret;
 pub mod secret_group_grant;
 pub mod secret_machine_grant;
 pub mod secret_user_grant;
+pub mod secret_version;
 pub mod session;
 pub mod user;

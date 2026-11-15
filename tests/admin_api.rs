@@ -39,6 +39,7 @@ impl Fixture {
             organization_key_file: None,
             ip_header: None,
             log_file: None,
+            secret_history_limit: 20,
             allow_plaintext_backups: false,
         };
         Self {
