@@ -21,6 +21,7 @@
     "@astryxdesign/theme-y2k": "0.1.8",
     "@floating-ui/react-dom": "^2.1.9",
     "lucide-react": "1.27.0",
+    "qrcode-generator": "2.0.4",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "react-tourlight": "^0.3.0"

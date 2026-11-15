@@ -44,6 +44,7 @@ Use LightBWS for workloads such as injecting a database URL into a service, supp
 - Project and direct-secret grants for users, groups, and machine accounts with read or read/write access.
 - Projects, secrets, machine accounts, soft-delete trash, and one-time access-token display.
 - Bounded per-secret version history, so an accidental edit from the Web UI or an SDK client can be reviewed and undone.
+- Optional two-factor sign-in for the Web UI with any authenticator app (TOTP) and one-time recovery codes, with a setting to require it.
 - Audit collection controls with automatic retention cleanup, manual clearing, and a full off switch.
 - Cookie sessions, CSRF protection, Argon2id passwords, encrypted backup credentials, and hardened response headers.
 - Chinese and English UI with seven built-in Astryx themes and system, light, and dark color modes.
@@ -129,6 +130,8 @@ The remaining values are passed into the LightBWS container:
 | `LIGHTBWS_IP_HEADER` | none | Header that carries the client address behind a reverse proxy, such as `X-Real-IP`. Used for failed-login logs and the login rate limit. Only set it when every request comes through that proxy. See [fail2ban](docs/fail2ban.md). |
 | `LIGHTBWS_LOG_FILE` | none | Also append plain-text logs to this file, for example for fail2ban. |
 | `LIGHTBWS_SECRET_HISTORY_LIMIT` | `20` | Earlier versions kept per secret, from `0` to `1000`. `0` stops recording new versions without deleting existing history. See [Secret version history](#secret-version-history). |
+| `LIGHTBWS_REQUIRE_2FA` | `off` | Who must use two-factor sign-in for the Web UI: `off` (each user chooses), `admins`, or `all`. See [Two-factor sign-in](#two-factor-sign-in). |
+| `LIGHTBWS_RESET_2FA_FOR` | none | Username whose second factor is removed at startup. For an administrator who is locked out; unset it after one start. |
 | `RUST_LOG` | `lightbws=info,tower_http=info` | Structured log filter. |
 
 The image already sets `LIGHTBWS_BIND=0.0.0.0:8080` and `LIGHTBWS_DATA_DIR=/data`. Native binary deployments can override both runtime variables; Compose normally changes the host mapping through `LIGHTBWS_LISTEN_ADDRESS` and `LIGHTBWS_PORT` instead.
@@ -221,6 +224,20 @@ Changing a secret's key, value, or note keeps the content that was replaced. Thi
 - History is stored exactly like current secrets, encrypted under the organization key, and travels with secrets in backups and exports.
 
 History contains old secret values. Rotating a leaked secret does not remove the leaked value from history until it ages out or an administrator clears that secret's history.
+
+## Two-factor sign-in
+
+Web UI users can add a second step to sign-in with any authenticator app that supports time-based codes (TOTP), such as Aegis, 2FAS, Google Authenticator, or a password manager. Machine accounts and SDK access tokens are not affected.
+
+- Each user turns it on under **Settings → Security**: confirm the password, scan the QR code (or type the setup key), and enter one code. The QR code is drawn in the browser; nothing is sent to an outside service.
+- Setup shows ten recovery codes once. Each signs in once in place of an authenticator code. Generating new codes replaces the old ones.
+- Turning it off, generating new recovery codes, and changing your own password all ask for the password and a current code. Turning it on, or changing the password, signs out the user's other sessions.
+- `LIGHTBWS_REQUIRE_2FA=admins` or `all` makes it mandatory. A user it applies to who has not set it up can sign in but is held at the setup screen until they do, and cannot turn it off afterwards.
+- An administrator can reset another user's second factor on the **Users** page. The user is signed out and signs in with the password alone. If the only administrator is locked out, start LightBWS once with `LIGHTBWS_RESET_2FA_FOR=<username>`, then remove the variable.
+- A code works once, a sign-in attempt allows five wrong codes and expires after five minutes, and wrong codes are rate limited per address. Failures are logged with `reason=invalid_second_factor` in the format that [fail2ban](docs/fail2ban.md) reads.
+- Authenticator secrets are encrypted with the instance master key and recovery codes are stored as hashes. Both travel with the users scope of an export or backup, so a restored instance keeps everyone's second factor. Protect such archives accordingly.
+
+Every change is written to the audit log (`user.2fa.enable`, `user.2fa.disable`, `user.2fa.reset`, `user.2fa.recovery_code.used`, `user.2fa.recovery_codes.regenerate`, `user.password.change`).
 
 ## Audit log
 

@@ -1,4 +1,4 @@
-import type { AccessPolicy, AccessPolicyInput, AuditEvent, AuditSettings, BackupCapabilities, BackupJob, BackupScopes, BackupTarget, Group, IssuedMachineAccessToken, IssuedMachineAccount, MachineAccess, MachineAccessInput, MachineAccessToken, MachineAccount, Overview, Project, Role, Secret, SecretVersion, SecretVersionDetail, Session, User } from "./types"
+import type { AccessPolicy, AccessPolicyInput, AuditEvent, AuditSettings, BackupCapabilities, BackupJob, BackupScopes, BackupTarget, Group, IssuedMachineAccessToken, IssuedMachineAccount, LoginResult, MachineAccess, MachineAccessInput, MachineAccessToken, MachineAccount, Overview, Project, RecoveryCodes, Role, SecondFactorProof, Secret, SecretVersion, SecretVersionDetail, Session, TotpEnrollment, TwoFactorStatus, User } from "./types"
 
 export class ApiError extends Error {
   constructor(public status: number, public code: string, public detail?: string) {
@@ -29,8 +29,19 @@ function json(method: string, body: unknown): RequestInit {
 
 export const api = {
   async session() { const value = await request<Session>("/auth/session"); csrfToken = value.csrfToken; return value },
-  async login(username: string, password: string) { const value = await request<Session>("/auth/login", json("POST", { username, password })); csrfToken = value.csrfToken; return value },
+  async login(username: string, password: string) {
+    const value = await request<LoginResult>("/auth/login", json("POST", { username, password }))
+    if (!("twoFactorRequired" in value)) csrfToken = value.csrfToken
+    return value
+  },
+  async loginSecondFactor(challenge: string, proof: SecondFactorProof) { const value = await request<Session>("/auth/login/2fa", json("POST", { challenge, ...proof })); csrfToken = value.csrfToken; return value },
   async logout() { await request<void>("/auth/logout", { method: "POST" }); csrfToken = "" },
+  changePassword: (input: { currentPassword: string; newPassword: string } & Partial<Record<"code" | "recoveryCode", string>>) => request<void>("/auth/password", json("POST", input)),
+  twoFactorStatus: () => request<TwoFactorStatus>("/auth/2fa/status"),
+  setupTotp: (password: string) => request<TotpEnrollment>("/auth/2fa/totp/setup", json("POST", { password })),
+  confirmTotp: (code: string) => request<RecoveryCodes>("/auth/2fa/totp/confirm", json("POST", { code })),
+  disableTotp: (password: string, proof: SecondFactorProof) => request<void>("/auth/2fa/totp", json("DELETE", { password, ...proof })),
+  regenerateRecoveryCodes: (password: string, code: string) => request<RecoveryCodes>("/auth/2fa/recovery-codes/regenerate", json("POST", { password, code })),
   overview: () => request<Overview>("/overview"),
   projects: (trash = false) => request<Project[]>(`/projects?trash=${trash}`),
   createProject: (name: string) => request<Project>("/projects", json("POST", { name })),
@@ -52,6 +63,7 @@ export const api = {
   createUser: (input: { username: string; displayName: string; role: Role; password: string }) => request<User>("/admin/users", json("POST", input)),
   updateUser: (id: string, input: { displayName: string; role: Role; disabled: boolean }) => request<User>(`/admin/users/${id}`, json("PUT", input)),
   resetPassword: (id: string, password: string) => request<void>(`/admin/users/${id}/password`, json("PUT", { password })),
+  resetUserTwoFactor: (id: string) => request<void>(`/admin/users/${id}/2fa`, { method: "DELETE" }),
   groups: () => request<Group[]>("/admin/groups"),
   createGroup: (name: string) => request<Group>("/admin/groups", json("POST", { name })),
   updateGroup: (id: string, name: string) => request<Group>(`/admin/groups/${id}`, json("PUT", { name })),

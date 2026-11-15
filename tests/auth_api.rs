@@ -47,6 +47,8 @@ impl Fixture {
             ip_header,
             log_file: None,
             secret_history_limit: 20,
+            require_2fa: Default::default(),
+            reset_2fa_for: None,
             allow_plaintext_backups: false,
         };
         let state = AppState::new(db, &config);

@@ -57,6 +57,8 @@ impl Fixture {
             ip_header: None,
             log_file: None,
             secret_history_limit: 20,
+            require_2fa: Default::default(),
+            reset_2fa_for: None,
         };
         let master_key_text = "11".repeat(32);
         let master_key = MasterKey::parse(&master_key_text).expect("master key");

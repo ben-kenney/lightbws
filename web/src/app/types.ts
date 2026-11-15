@@ -11,9 +11,16 @@ export interface User {
   createdAt: number
   updatedAt: number
   lastLoginAt: number | null
+  twoFactorEnabled?: boolean
 }
 
-export interface Session { user: User; csrfToken: string }
+export interface Session { user: User; csrfToken: string; twoFactorEnrollmentRequired?: boolean }
+export interface SecondFactorChallenge { twoFactorRequired: true; challenge: string; methods: string[] }
+export type LoginResult = Session | SecondFactorChallenge
+export interface TwoFactorStatus { enabled: boolean; totpEnabled: boolean; recoveryCodesRemaining: number; required: boolean }
+export interface TotpEnrollment { secret: string; uri: string }
+export interface RecoveryCodes { recoveryCodes: string[] }
+export type SecondFactorProof = { code: string } | { recoveryCode: string }
 export interface Overview { projects: number; secrets: number; trash: number }
 export interface Permission { read: boolean; write: boolean }
 export interface Project { id: string; name: string; sdkEncrypted: boolean; deletedAt: number | null; createdAt: number; updatedAt: number; permissions: Permission }
