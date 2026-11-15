@@ -59,6 +59,8 @@ pub enum FailureReason {
     InvalidCredentials,
     /// The password was right but the second-factor code or recovery code was not.
     InvalidSecondFactor,
+    /// A passkey sign-in did not verify.
+    InvalidPasskey,
     RateLimited,
 }
 
@@ -67,6 +69,7 @@ impl FailureReason {
         match self {
             Self::InvalidCredentials => "invalid_credentials",
             Self::InvalidSecondFactor => "invalid_second_factor",
+            Self::InvalidPasskey => "invalid_passkey",
             Self::RateLimited => "rate_limited",
         }
     }

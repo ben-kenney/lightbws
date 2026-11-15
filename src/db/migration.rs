@@ -11,7 +11,66 @@ impl MigratorTrait for Migrator {
             Box::new(OrganizationKeyMigration),
             Box::new(SecretVersionsMigration),
             Box::new(TwoFactorMigration),
+            Box::new(PasskeysMigration),
         ]
+    }
+}
+
+struct PasskeysMigration;
+
+impl MigrationName for PasskeysMigration {
+    fn name(&self) -> &str {
+        "m20261115_000006_passkeys"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for PasskeysMigration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(
+                r#"
+                CREATE TABLE user_passkeys (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    user_id TEXT NOT NULL,
+                    credential_id TEXT NOT NULL,
+                    public_key TEXT NOT NULL,
+                    sign_count INTEGER NOT NULL DEFAULT 0,
+                    transports TEXT,
+                    backup_eligible INTEGER NOT NULL DEFAULT 0,
+                    backup_state INTEGER NOT NULL DEFAULT 0,
+                    name TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    last_used_at INTEGER,
+                    CHECK(length(id) = 36),
+                    CHECK(length(user_id) = 36),
+                    CHECK(length(credential_id) BETWEEN 1 AND 1364),
+                    CHECK(length(public_key) BETWEEN 1 AND 2731),
+                    CHECK(sign_count BETWEEN 0 AND 4294967295),
+                    CHECK(transports IS NULL OR length(transports) <= 256),
+                    CHECK(backup_eligible IN (0, 1)),
+                    CHECK(backup_state IN (0, 1)),
+                    CHECK(backup_eligible = 1 OR backup_state = 0),
+                    CHECK(length(name) BETWEEN 1 AND 128),
+                    CHECK(created_at >= 0),
+                    CHECK(last_used_at IS NULL OR last_used_at >= created_at),
+                    CONSTRAINT fk_user_passkey_user FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+                CREATE UNIQUE INDEX idx_user_passkeys_credential ON user_passkeys(credential_id);
+                CREATE INDEX idx_user_passkeys_user ON user_passkeys(user_id, created_at);
+                "#,
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared("DROP TABLE IF EXISTS user_passkeys;")
+            .await?;
+        Ok(())
     }
 }
 

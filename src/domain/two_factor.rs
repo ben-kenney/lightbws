@@ -19,9 +19,9 @@ use crate::{
     crypto::MasterKey,
     db::{
         Database,
-        entities::{login_challenge, user_recovery_code, user_totp},
+        entities::{login_challenge, user_passkey, user_recovery_code, user_totp},
     },
-    domain::{now, users::Role},
+    domain::{now, passkeys, users::Role},
     error::AppError,
     totp,
 };
@@ -71,6 +71,7 @@ pub struct TwoFactorStatus {
     /// Whether the user has any confirmed second factor.
     pub enabled: bool,
     pub totp_enabled: bool,
+    pub passkey_count: u64,
     pub recovery_codes_remaining: u64,
     /// Whether policy requires this user to have a second factor.
     pub required: bool,
@@ -134,22 +135,38 @@ impl TwoFactorRepository {
             .filter(user_recovery_code::Column::UsedAt.is_null())
             .count(self.db.connection())
             .await?;
+        let passkey_count = passkeys::count(self.db.connection(), &user_id.to_string()).await?;
         Ok(TwoFactorStatus {
-            enabled: totp_enabled,
+            enabled: totp_enabled || passkey_count > 0,
             totp_enabled,
+            passkey_count,
             recovery_codes_remaining,
             required,
         })
     }
 
-    /// The sign-in methods a user can complete the second step with. Empty when the user has
-    /// no confirmed second factor.
-    pub async fn methods(&self, user_id: Uuid) -> Result<Vec<&'static str>, AppError> {
+    /// The sign-in methods a user can complete the second step with, besides a recovery code.
+    /// `None` when the user has no confirmed second factor. The list can be empty: a user whose
+    /// only factor is a passkey, on an instance where passkeys have since been turned off, can
+    /// still only get in with a recovery code or an administrator's reset.
+    pub async fn methods(
+        &self,
+        user_id: Uuid,
+        passkeys_enabled: bool,
+    ) -> Result<Option<Vec<&'static str>>, AppError> {
+        let totp = self.confirmed_totp(user_id).await?.is_some();
+        let passkey = passkeys::count(self.db.connection(), &user_id.to_string()).await? > 0;
+        if !totp && !passkey {
+            return Ok(None);
+        }
         let mut methods = Vec::new();
-        if self.confirmed_totp(user_id).await?.is_some() {
+        if totp {
             methods.push("totp");
         }
-        Ok(methods)
+        if passkey && passkeys_enabled {
+            methods.push("passkey");
+        }
+        Ok(Some(methods))
     }
 
     /// Starts TOTP enrolment: stores a fresh unconfirmed secret, replacing a pending one. A
@@ -309,7 +326,9 @@ impl TwoFactorRepository {
         user_totp::Entity::delete_by_id(user_id.to_string())
             .exec(&transaction)
             .await?;
-        delete_recovery_codes(&transaction, user_id).await?;
+        if passkeys::count(&transaction, &user_id.to_string()).await? == 0 {
+            delete_recovery_codes(&transaction, user_id).await?;
+        }
         transaction.commit().await?;
         Ok(existed)
     }
@@ -323,12 +342,17 @@ impl TwoFactorRepository {
             .await?
             .rows_affected;
         let codes = delete_recovery_codes(&transaction, user_id).await?;
+        let removed_passkeys = user_passkey::Entity::delete_many()
+            .filter(user_passkey::Column::UserId.eq(user_id.to_string()))
+            .exec(&transaction)
+            .await?
+            .rows_affected;
         login_challenge::Entity::delete_many()
             .filter(login_challenge::Column::UserId.eq(user_id.to_string()))
             .exec(&transaction)
             .await?;
         transaction.commit().await?;
-        Ok(totp + codes > 0)
+        Ok(totp + codes + removed_passkeys > 0)
     }
 
     /// Issues a single-use challenge and returns its token. Only a digest is stored.
@@ -533,23 +557,32 @@ pub async fn is_enabled(
     Ok(user_totp::Entity::find_by_id(user_id)
         .one(connection)
         .await?
-        .is_some_and(|model| model.confirmed_at.is_some()))
+        .is_some_and(|model| model.confirmed_at.is_some())
+        || passkeys::count(connection, user_id).await? > 0)
 }
 
 /// The users, out of all users, that have a confirmed second factor.
 pub async fn enabled_user_ids(
     connection: &impl ConnectionTrait,
 ) -> Result<std::collections::HashSet<String>, AppError> {
-    Ok(user_totp::Entity::find()
+    let mut users = user_totp::Entity::find()
         .filter(user_totp::Column::ConfirmedAt.is_not_null())
         .all(connection)
         .await?
         .into_iter()
         .map(|model| model.user_id)
-        .collect())
+        .collect::<std::collections::HashSet<_>>();
+    users.extend(
+        user_passkey::Entity::find()
+            .all(connection)
+            .await?
+            .into_iter()
+            .map(|model| model.user_id),
+    );
+    Ok(users)
 }
 
-async fn delete_recovery_codes(
+pub(crate) async fn delete_recovery_codes(
     connection: &impl ConnectionTrait,
     user_id: Uuid,
 ) -> Result<u64, AppError> {
@@ -560,7 +593,7 @@ async fn delete_recovery_codes(
         .rows_affected)
 }
 
-async fn replace_recovery_codes(
+pub(crate) async fn replace_recovery_codes(
     connection: &impl ConnectionTrait,
     user_id: Uuid,
 ) -> Result<Vec<String>, AppError> {

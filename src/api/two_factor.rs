@@ -43,7 +43,9 @@ struct CodeInput {
 #[serde(deny_unknown_fields)]
 struct PasswordAndCodeInput {
     password: String,
-    code: String,
+    /// Required when the account has an authenticator app; passkey-only accounts omit it.
+    #[serde(default)]
+    code: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -141,7 +143,13 @@ async fn regenerate_recovery_codes(
     Json(input): Json<PasswordAndCodeInput>,
 ) -> Result<Json<RecoveryCodes>, AppError> {
     confirm_password(&state, &session, input.password).await?;
-    confirm_second_factor(&state, &session, Some(&input.code), None).await?;
+    let status = state.two_factor().status(session.user_id, false).await?;
+    if !status.enabled {
+        return Err(AppError::Conflict);
+    }
+    if status.totp_enabled {
+        confirm_second_factor(&state, &session, input.code.as_deref(), None).await?;
+    }
     let recovery_codes = state
         .two_factor()
         .regenerate_recovery_codes(session.user_id)
@@ -160,7 +168,14 @@ async fn disable_totp(
     PendingMutationSession(session): PendingMutationSession,
     Json(input): Json<DisableInput>,
 ) -> Result<StatusCode, AppError> {
-    if state.require_2fa.requires(session.user.role) {
+    if state.require_2fa.requires(session.user.role)
+        && state
+            .two_factor()
+            .status(session.user_id, true)
+            .await?
+            .passkey_count
+            == 0
+    {
         return Err(AppError::Validation(
             "two-factor authentication is required for this account".into(),
         ));
@@ -187,7 +202,14 @@ pub async fn change_password(
     Json(input): Json<ChangePasswordInput>,
 ) -> Result<StatusCode, AppError> {
     confirm_password(&state, &session, input.current_password).await?;
-    if session.user.two_factor_enabled {
+    // A passkey cannot be typed into a form; the password is the confirmation for an account
+    // whose only second factor is a passkey.
+    if state
+        .two_factor()
+        .status(session.user_id, false)
+        .await?
+        .totp_enabled
+    {
         confirm_second_factor(
             &state,
             &session,
@@ -206,7 +228,7 @@ pub async fn change_password(
 
 /// Checks the signed-in user's password. Failures are limited per user, so a borrowed session
 /// cannot be used to guess the password.
-async fn confirm_password(
+pub(super) async fn confirm_password(
     state: &AppState,
     session: &AuthenticatedSession,
     password: String,
@@ -272,7 +294,7 @@ fn reauth_rate_key(user_id: Uuid) -> String {
     format!("confirm|{user_id}")
 }
 
-async fn record(state: &AppState, user_id: Uuid, action: &str) -> Result<(), AppError> {
+pub(super) async fn record(state: &AppState, user_id: Uuid, action: &str) -> Result<(), AppError> {
     AuditRepository::new(state.db.clone())
         .record(
             AuditActor::User(user_id),

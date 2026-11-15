@@ -2,6 +2,7 @@ pub mod access;
 pub mod admin;
 pub mod auth;
 pub mod backups;
+pub mod passkeys;
 pub mod sdk;
 pub mod transfer;
 pub mod two_factor;

@@ -71,6 +71,7 @@ impl Fixture {
             secret_history_limit: 20,
             require_2fa,
             reset_2fa_for: None,
+            public_url: None,
             allow_plaintext_backups: false,
         };
         let master_key = MasterKey::random().expect("master key");
@@ -215,7 +216,7 @@ async fn users_without_a_second_factor_sign_in_as_before() {
         .await;
     assert_eq!(
         response_json(status).await,
-        json!({ "enabled": false, "totpEnabled": false, "recoveryCodesRemaining": 0, "required": false })
+        json!({ "enabled": false, "totpEnabled": false, "passkeyCount": 0, "recoveryCodesRemaining": 0, "required": false })
     );
 }
 
@@ -936,6 +937,7 @@ impl Fixture {
             secret_history_limit: 20,
             require_2fa: TwoFactorPolicy::Off,
             reset_2fa_for: None,
+            public_url: None,
             allow_plaintext_backups: false,
         };
         Self {

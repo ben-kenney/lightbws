@@ -14,4 +14,6 @@ pub fn routes() -> Router<AppState> {
         .route("/logout", post(auth::logout))
         .route("/password", post(super::two_factor::change_password))
         .nest("/2fa", super::two_factor::routes())
+        .nest("/passkeys", super::passkeys::routes())
+        .merge(super::passkeys::login_routes())
 }

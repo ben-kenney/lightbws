@@ -44,7 +44,7 @@ Use LightBWS for workloads such as injecting a database URL into a service, supp
 - Project and direct-secret grants for users, groups, and machine accounts with read or read/write access.
 - Projects, secrets, machine accounts, soft-delete trash, and one-time access-token display.
 - Bounded per-secret version history, so an accidental edit from the Web UI or an SDK client can be reviewed and undone.
-- Optional two-factor sign-in for the Web UI with any authenticator app (TOTP) and one-time recovery codes, with a setting to require it.
+- Optional two-factor sign-in for the Web UI with any authenticator app (TOTP) or passkeys, one-time recovery codes, and a setting to require it. Passkeys can also sign in without a password.
 - Audit collection controls with automatic retention cleanup, manual clearing, and a full off switch.
 - Cookie sessions, CSRF protection, Argon2id passwords, encrypted backup credentials, and hardened response headers.
 - Chinese and English UI with seven built-in Astryx themes and system, light, and dark color modes.
@@ -132,6 +132,7 @@ The remaining values are passed into the LightBWS container:
 | `LIGHTBWS_SECRET_HISTORY_LIMIT` | `20` | Earlier versions kept per secret, from `0` to `1000`. `0` stops recording new versions without deleting existing history. See [Secret version history](#secret-version-history). |
 | `LIGHTBWS_REQUIRE_2FA` | `off` | Who must use two-factor sign-in for the Web UI: `off` (each user chooses), `admins`, or `all`. See [Two-factor sign-in](#two-factor-sign-in). |
 | `LIGHTBWS_RESET_2FA_FOR` | none | Username whose second factor is removed at startup. For an administrator who is locked out; unset it after one start. |
+| `LIGHTBWS_PUBLIC_URL` | none | The address users open in their browser, such as `https://secrets.example.com`. Turns on [passkeys](#passkeys), which are bound to this host name. Must be HTTPS, or `http://localhost` for development. |
 | `RUST_LOG` | `lightbws=info,tower_http=info` | Structured log filter. |
 
 The image already sets `LIGHTBWS_BIND=0.0.0.0:8080` and `LIGHTBWS_DATA_DIR=/data`. Native binary deployments can override both runtime variables; Compose normally changes the host mapping through `LIGHTBWS_LISTEN_ADDRESS` and `LIGHTBWS_PORT` instead.
@@ -231,13 +232,26 @@ Web UI users can add a second step to sign-in with any authenticator app that su
 
 - Each user turns it on under **Settings → Security**: confirm the password, scan the QR code (or type the setup key), and enter one code. The QR code is drawn in the browser; nothing is sent to an outside service.
 - Setup shows ten recovery codes once. Each signs in once in place of an authenticator code. Generating new codes replaces the old ones.
-- Turning it off, generating new recovery codes, and changing your own password all ask for the password and a current code. Turning it on, or changing the password, signs out the user's other sessions.
+- Turning it off, generating new recovery codes, and changing your own password all ask for the password and a current code (the password alone on an account whose only second factor is a passkey). Turning it on, or changing the password, signs out the user's other sessions.
 - `LIGHTBWS_REQUIRE_2FA=admins` or `all` makes it mandatory. A user it applies to who has not set it up can sign in but is held at the setup screen until they do, and cannot turn it off afterwards.
 - An administrator can reset another user's second factor on the **Users** page. The user is signed out and signs in with the password alone. If the only administrator is locked out, start LightBWS once with `LIGHTBWS_RESET_2FA_FOR=<username>`, then remove the variable.
 - A code works once, a sign-in attempt allows five wrong codes and expires after five minutes, and wrong codes are rate limited per address. Failures are logged with `reason=invalid_second_factor` in the format that [fail2ban](docs/fail2ban.md) reads.
 - Authenticator secrets are encrypted with the instance master key and recovery codes are stored as hashes. Both travel with the users scope of an export or backup, so a restored instance keeps everyone's second factor. Protect such archives accordingly.
 
-Every change is written to the audit log (`user.2fa.enable`, `user.2fa.disable`, `user.2fa.reset`, `user.2fa.recovery_code.used`, `user.2fa.recovery_codes.regenerate`, `user.password.change`).
+### Passkeys
+
+A passkey (WebAuthn) signs in with a fingerprint, face, device PIN, or security key. The browser only releases it to the site it was created for, so a look-alike sign-in page gets nothing it can reuse.
+
+- **Requirements.** Set `LIGHTBWS_PUBLIC_URL` to the exact address users type, and serve that address over HTTPS (browsers do not offer passkeys on plain HTTP, except on `localhost`). Behind a reverse proxy this is the proxy's public address, not the address LightBWS listens on. Without it the passkey options are hidden and nothing else changes.
+- **Adding one.** Under **Settings → Security**, choose **Add a passkey**, confirm the password, and name it. A passkey counts as a second factor: the first one issues recovery codes and signs out the user's other sessions, exactly like setting up an authenticator app. A user can have passkeys, an authenticator app, or both, and either satisfies `LIGHTBWS_REQUIRE_2FA`.
+- **Signing in.** After the password, use the passkey instead of typing a code. Or choose **Sign in with a passkey** and skip the password: LightBWS always requires the authenticator to verify the user (PIN or biometric), so the passkey alone is already two factors.
+- **Synced or device-bound.** The list shows whether a passkey is synced by its provider (for example a phone's or password manager's cloud) or lives on one device only. Register at least two, or keep the recovery codes, so losing a device does not lock you out.
+- **Removing.** Removing a passkey needs the password. The last remaining second factor cannot be removed while policy requires one. An administrator reset and `LIGHTBWS_RESET_2FA_FOR` remove passkeys too.
+- **Changing the host name** makes every registered passkey unusable, because passkeys are bound to it. Users then sign in with password plus authenticator code or a recovery code and register again. The same applies to a backup restored on an instance with a different host name; passkeys are included with the users scope and contain public keys only.
+- If `LIGHTBWS_PUBLIC_URL` is removed later, a user whose only second factor is a passkey still needs a second step and can only use a recovery code, or ask an administrator for a reset.
+- LightBWS does not request attestation, so it does not learn the make or model of an authenticator. ES256, EdDSA and RS256 keys are accepted. A signature counter that fails to advance, which can indicate a copied authenticator, refuses the sign-in and writes a `user.passkey.counter_regression` audit event. Failures are logged with `reason=invalid_passkey` for [fail2ban](docs/fail2ban.md).
+
+Every change is written to the audit log (`user.passkey.add`, `user.passkey.rename`, `user.passkey.remove`, `user.2fa.enable`, `user.2fa.disable`, `user.2fa.reset`, `user.2fa.recovery_code.used`, `user.2fa.recovery_codes.regenerate`, `user.password.change`).
 
 ## Audit log
 

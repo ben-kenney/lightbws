@@ -22,5 +22,6 @@ pub mod secret_user_grant;
 pub mod secret_version;
 pub mod session;
 pub mod user;
+pub mod user_passkey;
 pub mod user_recovery_code;
 pub mod user_totp;
