@@ -19,7 +19,7 @@ use crate::{
             machine_account, machine_group_grant, machine_session, machine_user_grant, project,
             project_group_grant, project_machine_grant, project_user_grant, secret,
             secret_group_grant, secret_machine_grant, secret_user_grant, secret_version, user,
-            user_recovery_code,
+            user_passkey, user_recovery_code,
         },
     },
     domain::{
@@ -156,6 +156,11 @@ struct DatabaseDumpV3 {
     user_totp: Option<Vec<UserTotpRecord>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     user_recovery_codes: Option<Vec<user_recovery_code::Model>>,
+    /// Passkeys, part of the identities scope. They hold public keys only and work on the
+    /// destination when it is served from the same host name. Archives written before passkeys
+    /// existed omit the section.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    user_passkeys: Option<Vec<user_passkey::Model>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     groups: Option<Vec<group::Model>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -360,6 +365,8 @@ pub async fn dump_database_scoped(
     };
     let user_recovery_codes =
         optional_models::<user_recovery_code::Entity>(&transaction, scopes.identities).await?;
+    let user_passkeys =
+        optional_models::<user_passkey::Entity>(&transaction, scopes.identities).await?;
     let groups = optional_models::<group::Entity>(&transaction, scopes.identities).await?;
     let group_members =
         optional_models::<group_member::Entity>(&transaction, scopes.identities).await?;
@@ -442,6 +449,7 @@ pub async fn dump_database_scoped(
         users,
         user_totp,
         user_recovery_codes,
+        user_passkeys,
         groups,
         group_members,
         machine_accounts,
@@ -721,6 +729,27 @@ pub async fn import_database_scoped(
     }
     for code in recovery_codes {
         code.into_active_model().insert(&transaction).await?;
+    }
+    let passkeys = dump.user_passkeys.unwrap_or_default();
+    if !passkeys.is_empty() {
+        // An archived passkey replaces a destination row with the same ID or credential.
+        user_passkey::Entity::delete_many()
+            .filter(
+                sea_orm::Condition::any()
+                    .add(
+                        user_passkey::Column::Id
+                            .is_in(passkeys.iter().map(|passkey| passkey.id.clone())),
+                    )
+                    .add(
+                        user_passkey::Column::CredentialId
+                            .is_in(passkeys.iter().map(|passkey| passkey.credential_id.clone())),
+                    ),
+            )
+            .exec(&transaction)
+            .await?;
+    }
+    for passkey in passkeys {
+        passkey.into_active_model().insert(&transaction).await?;
     }
     for record in dump.projects {
         upsert_model(
@@ -1223,6 +1252,7 @@ fn validate_v3_sections(dump: &DatabaseDumpV3) -> Result<(), AppError> {
         // Optional within the identities scope: older archives do not have them.
         && (dump.user_totp.is_none() || dump.scopes.identities)
         && (dump.user_recovery_codes.is_none() || dump.scopes.identities)
+        && (dump.user_passkeys.is_none() || dump.scopes.identities)
         && dump.machine_accounts.is_some() == dump.scopes.machine_accounts
         && dump.machine_access_tokens.is_some() == dump.scopes.machine_accounts
         && dump.project_user_grants.is_some() == dump.scopes.access_policies
@@ -1272,6 +1302,17 @@ fn validate_second_factors(dump: &DatabaseDumpV3) -> Result<(), AppError> {
                 .is_some_and(|used_at| used_at < code.created_at)
             || !ids.insert(code.id.as_str())
             || !digests.insert((code.user_id.as_str(), code.code_digest.as_str()))
+        {
+            return Err(invalid());
+        }
+    }
+    let mut passkey_ids = std::collections::HashSet::new();
+    let mut credentials = std::collections::HashSet::new();
+    for passkey in dump.user_passkeys.iter().flatten() {
+        if !user_ids.contains(passkey.user_id.as_str())
+            || !crate::domain::passkeys::validate_record(passkey)
+            || !passkey_ids.insert(passkey.id.as_str())
+            || !credentials.insert(passkey.credential_id.as_str())
         {
             return Err(invalid());
         }
@@ -1353,6 +1394,7 @@ async fn clear_full_instance(connection: &impl ConnectionTrait) -> Result<(), Ap
             DELETE FROM sessions;
             DELETE FROM login_challenges;
             DELETE FROM user_recovery_codes;
+            DELETE FROM user_passkeys;
             DELETE FROM user_totp;
             DELETE FROM secret_versions;
             DELETE FROM secrets;

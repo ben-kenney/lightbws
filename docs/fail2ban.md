@@ -7,7 +7,7 @@ LightBWS writes one warning line for every refused login, so [fail2ban](https://
 2026-10-25T11:30:04.654321Z  WARN lightbws::auth: machine login failed ip=203.0.113.7 reason=invalid_credentials client_id="0b3f..."
 ```
 
-`reason` is `invalid_credentials`, `invalid_second_factor` (the password was right but the authenticator code or recovery code was not) or `rate_limited` (a built-in limit was hit: 8 failures per username and address per minute, or 30 wrong second-factor codes per address per minute). Wrong usernames, wrong passwords and disabled accounts all log the same `invalid_credentials` reason. The bundled filter matches every reason. The address is always the first field, and client-supplied values are quoted and escaped, so a crafted username cannot make the filter ban someone else's address. The format is a stable interface for this filter.
+`reason` is `invalid_credentials`, `invalid_second_factor` (the password was right but the authenticator code or recovery code was not), `invalid_passkey` (a passkey sign-in did not verify; `username` is empty when the attempt named no account) or `rate_limited` (a built-in limit was hit: 8 failures per username and address per minute, or 30 wrong second-factor codes or passkey attempts per address per minute). Wrong usernames, wrong passwords and disabled accounts all log the same `invalid_credentials` reason. The bundled filter matches every reason. The address is always the first field, and client-supplied values are quoted and escaped, so a crafted username cannot make the filter ban someone else's address. The format is a stable interface for this filter.
 
 ## 1. Log the real client address
 

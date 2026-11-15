@@ -11,6 +11,7 @@ use crate::domain::{
     secret_history::{DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT},
     two_factor::TwoFactorPolicy,
 };
+use crate::webauthn::RelyingParty;
 
 #[derive(Clone)]
 pub struct BootstrapAdmin {
@@ -38,6 +39,8 @@ pub struct Config {
     /// Username whose second factor is removed once at start-up, for an administrator who lost
     /// both the authenticator and the recovery codes.
     pub reset_2fa_for: Option<String>,
+    /// The address users open in their browser. Passkeys are bound to it; unset disables them.
+    pub public_url: Option<RelyingParty>,
 }
 
 impl Config {
@@ -82,6 +85,12 @@ impl Config {
             None => TwoFactorPolicy::Off,
         };
         let reset_2fa_for = env_value("LIGHTBWS_RESET_2FA_FOR");
+        let public_url = env_value("LIGHTBWS_PUBLIC_URL")
+            .map(|value| {
+                RelyingParty::from_public_url(&value)
+                    .map_err(|reason| anyhow::anyhow!("invalid LIGHTBWS_PUBLIC_URL: {reason}"))
+            })
+            .transpose()?;
         Ok(Self {
             bind,
             data_dir,
@@ -95,6 +104,7 @@ impl Config {
             secret_history_limit,
             require_2fa,
             reset_2fa_for,
+            public_url,
         })
     }
 
@@ -216,6 +226,7 @@ impl std::fmt::Debug for Config {
             .field("secret_history_limit", &self.secret_history_limit)
             .field("require_2fa", &self.require_2fa)
             .field("reset_2fa_for", &self.reset_2fa_for)
+            .field("public_url", &self.public_url)
             .finish()
     }
 }
@@ -271,6 +282,7 @@ mod tests {
             secret_history_limit: 20,
             require_2fa: Default::default(),
             reset_2fa_for: None,
+            public_url: None,
         };
         assert!(config(None).organization_key_path().is_err());
         assert!(

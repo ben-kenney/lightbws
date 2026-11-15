@@ -12,7 +12,9 @@ backup objects are derived views.
 - `user_totp` holds at most one authenticator secret per user, encrypted with the instance master
   key, and the last accepted time step so a code cannot be replayed. `user_recovery_codes` stores
   only digests. `login_challenges` holds short-lived, digest-identified sign-in steps that are
-  waiting for a second factor.
+  waiting for a second factor, and the single-use challenges of passkey ceremonies.
+- `user_passkeys` stores WebAuthn credentials: the credential ID, the public key, the signature
+  counter and the synced/device-bound flags. Nothing in it is secret.
 - `projects` belongs to the organization; `secrets` belongs to exactly one project. A secret does not
   duplicate `organization_id`, so project and secret organization membership cannot diverge.
 - `secret_versions` keeps a bounded history of each secret's earlier key, value, and note in the
@@ -94,8 +96,9 @@ restoring the project preserves secrets that had already been individually delet
 | `organizations` | SDK organization identity and organization-key check | Fixed-width identifier, bounded non-empty name, bounded key check, restricted project deletion |
 | `users` | Human identities | Case-insensitive username uniqueness, role/Boolean checks, monotonic account timestamps, active-admin lookup index |
 | `user_totp` | Authenticator secret per user | One row per user, bounded ciphertext, confirmation not before creation, non-negative replay step, user cascade |
+| `user_passkeys` | WebAuthn credentials | Credential ID unique across accounts, bounded key and name, counter within 32 bits, synced only if eligible, use not before creation, user cascade, owner index |
 | `user_recovery_codes` | One-time recovery codes | Digest-only codes unique per user, use not before creation, user cascade |
-| `login_challenges` | Sign-in steps awaiting a second factor | Digest-only identifiers, expiry after creation, non-negative failure count, bounded state, user cascade, global expiry index |
+| `login_challenges` | Sign-in steps awaiting a second factor, passkey ceremonies | Digest-only identifiers, expiry after creation, non-negative failure count, bounded state, user cascade, global expiry index |
 | `sessions` | Web bearer sessions | Digest-only identifiers, expiry after creation, user cascade, user and global expiry indexes |
 | `projects` | Secret grouping and policy boundary | Exactly one plaintext/ciphertext representation, organization FK, soft-delete timeline, organization/list index |
 | `secrets` | Sensitive key-value records | Exactly one project, bounded plaintext/ciphertext representation, soft-delete timeline, project/list/revision indexes |

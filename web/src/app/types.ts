@@ -17,7 +17,11 @@ export interface User {
 export interface Session { user: User; csrfToken: string; twoFactorEnrollmentRequired?: boolean }
 export interface SecondFactorChallenge { twoFactorRequired: true; challenge: string; methods: string[] }
 export type LoginResult = Session | SecondFactorChallenge
-export interface TwoFactorStatus { enabled: boolean; totpEnabled: boolean; recoveryCodesRemaining: number; required: boolean }
+export interface TwoFactorStatus { enabled: boolean; totpEnabled: boolean; passkeyCount: number; recoveryCodesRemaining: number; required: boolean }
+export interface AuthConfig { initialized: boolean; localEnabled: boolean; passkeysEnabled?: boolean }
+export interface Passkey { id: string; name: string; createdAt: number; lastUsedAt: number | null; synced: boolean }
+export interface PasskeyOptions { publicKey: Record<string, unknown> }
+export interface PasskeyRegistered { passkey: Passkey; recoveryCodes?: string[] }
 export interface TotpEnrollment { secret: string; uri: string }
 export interface RecoveryCodes { recoveryCodes: string[] }
 export type SecondFactorProof = { code: string } | { recoveryCode: string }

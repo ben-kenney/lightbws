@@ -45,6 +45,7 @@ fn config(data: &tempfile::TempDir) -> Config {
         secret_history_limit: 20,
         require_2fa: Default::default(),
         reset_2fa_for: None,
+        public_url: None,
     }
 }
 
