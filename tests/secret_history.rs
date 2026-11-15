@@ -83,6 +83,8 @@ impl Fixture {
             ip_header: None,
             log_file: None,
             secret_history_limit: limit,
+            require_2fa: Default::default(),
+            reset_2fa_for: None,
             allow_plaintext_backups: false,
         };
         Self {

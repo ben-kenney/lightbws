@@ -57,6 +57,8 @@ pub enum LoginKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FailureReason {
     InvalidCredentials,
+    /// The password was right but the second-factor code or recovery code was not.
+    InvalidSecondFactor,
     RateLimited,
 }
 
@@ -64,6 +66,7 @@ impl FailureReason {
     fn as_str(self) -> &'static str {
         match self {
             Self::InvalidCredentials => "invalid_credentials",
+            Self::InvalidSecondFactor => "invalid_second_factor",
             Self::RateLimited => "rate_limited",
         }
     }

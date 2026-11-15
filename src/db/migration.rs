@@ -10,7 +10,90 @@ impl MigratorTrait for Migrator {
             Box::new(BackupOptionsMigration),
             Box::new(OrganizationKeyMigration),
             Box::new(SecretVersionsMigration),
+            Box::new(TwoFactorMigration),
         ]
+    }
+}
+
+struct TwoFactorMigration;
+
+impl MigrationName for TwoFactorMigration {
+    fn name(&self) -> &str {
+        "m20261115_000005_two_factor"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for TwoFactorMigration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(
+                r#"
+                CREATE TABLE user_totp (
+                    user_id TEXT PRIMARY KEY NOT NULL,
+                    secret_cipher TEXT NOT NULL,
+                    confirmed_at BIGINT,
+                    last_used_step BIGINT,
+                    created_at BIGINT NOT NULL,
+                    CHECK(length(user_id) = 36),
+                    CHECK(length(secret_cipher) BETWEEN 1 AND 1024),
+                    CHECK(created_at >= 0),
+                    CHECK(confirmed_at IS NULL OR confirmed_at >= created_at),
+                    CHECK(last_used_step IS NULL OR last_used_step >= 0),
+                    CONSTRAINT fk_user_totp_user FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+                CREATE TABLE user_recovery_codes (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    user_id TEXT NOT NULL,
+                    code_digest TEXT NOT NULL,
+                    used_at BIGINT,
+                    created_at BIGINT NOT NULL,
+                    CHECK(length(id) = 36),
+                    CHECK(length(user_id) = 36),
+                    CHECK(length(code_digest) = 64),
+                    CHECK(created_at >= 0),
+                    CHECK(used_at IS NULL OR used_at >= created_at),
+                    CONSTRAINT fk_user_recovery_code_user FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+                CREATE UNIQUE INDEX idx_user_recovery_codes_user_digest
+                ON user_recovery_codes(user_id, code_digest);
+                CREATE TABLE login_challenges (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    user_id TEXT,
+                    kind VARCHAR(32) NOT NULL,
+                    state TEXT,
+                    failed_attempts INTEGER NOT NULL DEFAULT 0,
+                    expires_at BIGINT NOT NULL,
+                    created_at BIGINT NOT NULL,
+                    CHECK(length(id) = 64),
+                    CHECK(user_id IS NULL OR length(user_id) = 36),
+                    CHECK(length(kind) BETWEEN 1 AND 32),
+                    CHECK(state IS NULL OR length(state) <= 16384),
+                    CHECK(failed_attempts >= 0),
+                    CHECK(created_at >= 0),
+                    CHECK(expires_at > created_at),
+                    CONSTRAINT fk_login_challenge_user FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+                CREATE INDEX idx_login_challenges_expiry ON login_challenges(expires_at);
+                "#,
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(
+                r#"
+                DROP TABLE IF EXISTS login_challenges;
+                DROP TABLE IF EXISTS user_recovery_codes;
+                DROP TABLE IF EXISTS user_totp;
+                "#,
+            )
+            .await?;
+        Ok(())
     }
 }
 

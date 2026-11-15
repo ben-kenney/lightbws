@@ -81,6 +81,7 @@ pub fn routes() -> Router<AppState> {
         .route("/users", get(list_users).post(create_user))
         .route("/users/{id}", axum::routing::put(update_user))
         .route("/users/{id}/password", axum::routing::put(reset_password))
+        .route("/users/{id}/2fa", axum::routing::delete(reset_two_factor))
         .route("/machines", get(list_machines).post(create_machine))
         .route(
             "/machines/{id}/tokens",
@@ -237,6 +238,28 @@ async fn reset_password(
         .await?;
     revoke_user_sessions(&state, id).await?;
     record_admin_event(&state, &mutation, "user.password.reset", "user", id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Removes a user's second factor and recovery codes and signs them out, for a user who lost
+/// both. Administrators cannot use this on themselves; they use the self-service route, which
+/// needs a code.
+async fn reset_two_factor(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    mutation: MutationSession,
+) -> Result<StatusCode, AppError> {
+    require_admin(&mutation.0.user)?;
+    if id == mutation.0.user_id {
+        return Err(AppError::Conflict);
+    }
+    UserRepository::new(state.db.clone())
+        .find_model(&id.to_string())
+        .await?
+        .ok_or(AppError::NotFound)?;
+    state.two_factor().reset(id).await?;
+    revoke_user_sessions(&state, id).await?;
+    record_admin_event(&state, &mutation, "user.2fa.reset", "user", id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

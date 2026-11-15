@@ -7,7 +7,10 @@ use anyhow::{Context, Result, bail};
 use axum::http::HeaderName;
 use secrecy::SecretString;
 
-use crate::domain::secret_history::{DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT};
+use crate::domain::{
+    secret_history::{DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT},
+    two_factor::TwoFactorPolicy,
+};
 
 #[derive(Clone)]
 pub struct BootstrapAdmin {
@@ -30,6 +33,11 @@ pub struct Config {
     pub log_file: Option<PathBuf>,
     /// Earlier versions kept per secret. Zero stops recording history.
     pub secret_history_limit: u32,
+    /// Who must set up a second factor before using the web client.
+    pub require_2fa: TwoFactorPolicy,
+    /// Username whose second factor is removed once at start-up, for an administrator who lost
+    /// both the authenticator and the recovery codes.
+    pub reset_2fa_for: Option<String>,
 }
 
 impl Config {
@@ -68,6 +76,12 @@ impl Config {
             .map(|value| parse_history_limit(&value))
             .transpose()?
             .unwrap_or(DEFAULT_HISTORY_LIMIT);
+        let require_2fa = match env_value("LIGHTBWS_REQUIRE_2FA") {
+            Some(value) => TwoFactorPolicy::parse(&value)
+                .context("LIGHTBWS_REQUIRE_2FA must be off, admins or all")?,
+            None => TwoFactorPolicy::Off,
+        };
+        let reset_2fa_for = env_value("LIGHTBWS_RESET_2FA_FOR");
         Ok(Self {
             bind,
             data_dir,
@@ -79,6 +93,8 @@ impl Config {
             ip_header,
             log_file,
             secret_history_limit,
+            require_2fa,
+            reset_2fa_for,
         })
     }
 
@@ -198,6 +214,8 @@ impl std::fmt::Debug for Config {
             .field("ip_header", &self.ip_header)
             .field("log_file", &self.log_file)
             .field("secret_history_limit", &self.secret_history_limit)
+            .field("require_2fa", &self.require_2fa)
+            .field("reset_2fa_for", &self.reset_2fa_for)
             .finish()
     }
 }
@@ -251,6 +269,8 @@ mod tests {
             ip_header: None,
             log_file: None,
             secret_history_limit: 20,
+            require_2fa: Default::default(),
+            reset_2fa_for: None,
         };
         assert!(config(None).organization_key_path().is_err());
         assert!(

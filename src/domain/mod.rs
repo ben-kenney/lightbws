@@ -7,6 +7,7 @@ pub mod projects;
 pub mod secret_history;
 pub mod secrets;
 pub mod transfer;
+pub mod two_factor;
 pub mod users;
 
 pub const ORGANIZATION_ID: &str = "f4e44a7f-1190-432a-9d4a-af96013127cb";

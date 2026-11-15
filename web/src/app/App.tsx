@@ -7,10 +7,11 @@ import { Skeleton } from "@astryxdesign/core/Skeleton"
 import { Tooltip } from "@astryxdesign/core/Tooltip"
 import { SpotlightTour, useSpotlight, type SpotlightStep } from "react-tourlight"
 import { ArchiveRestore, BookOpen, Boxes, Check, ChevronRight, CircleGauge, Clock3, CloudUpload, Copy, DatabaseBackup, Eye, EyeOff, ExternalLink, FileDown, FileUp, FolderKanban, Globe2, History, Info, KeyRound, Languages, LogOut, Menu, Monitor, Moon, MoveHorizontal, Network, Pencil, Plus, RefreshCw, ScrollText, Search, ServerCog, Settings, ShieldCheck, Sun, Trash2, UserCog, UsersRound, X } from "lucide-react"
+import qrcode from "qrcode-generator"
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ComponentProps, type FormEvent, type ReactNode } from "react"
 
 import { ApiError, api } from "./api"
-import type { AccessPolicy, AuditEvent, AuditSettings, BackupCapabilities, BackupConfig, BackupEncryption, BackupJob, BackupScopes, BackupTarget, GrantInput, Group, IssuedMachineAccessToken, IssuedMachineAccount, Locale, MachineAccessToken, MachineAccount, NamedGrant, Overview, Project, Role, Secret, SecretVersion, SecretVersionDetail, Session, ThemeMode, User } from "./types"
+import type { AccessPolicy, AuditEvent, AuditSettings, BackupCapabilities, BackupConfig, BackupEncryption, BackupJob, BackupScopes, BackupTarget, GrantInput, Group, IssuedMachineAccessToken, IssuedMachineAccount, Locale, MachineAccessToken, MachineAccount, NamedGrant, Overview, Project, Role, SecondFactorProof, Secret, SecretVersion, SecretVersionDetail, Session, ThemeMode, TotpEnrollment, TwoFactorStatus, User } from "./types"
 import { useI18n } from "../i18n/I18nProvider"
 import type { MessageKey } from "../i18n/messages"
 import type { AstryxThemeName } from "../theme/astryxThemes"
@@ -71,6 +72,7 @@ export function App() {
 
   if (loading) return <LoadingScreen />
   if (!session) return <LoginPage onAuthenticated={authenticated} />
+  if (session.twoFactorEnrollmentRequired) return <EnrollmentRequiredPage onEnrolled={() => api.session().then(setSession)} onSignedOut={signedOut} />
   return <Workspace session={session} onSignedOut={signedOut} />
 }
 
@@ -87,23 +89,61 @@ function LoadingScreen() {
   )
 }
 
+const CHALLENGE_LIFETIME_MS = 5 * 60 * 1000
+const CHALLENGE_ATTEMPTS = 5
+
 function LoginPage({ onAuthenticated }: { onAuthenticated: (session: Session) => void }) {
   const { locale, setLocale, t } = useI18n()
   const { resolved, setMode } = useTheme()
   const [username, setUsername] = useState("")
   const [password, setPassword] = useState("")
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState(false)
+  const [error, setError] = useState<MessageKey | null>(null)
+  const [challenge, setChallenge] = useState<{ token: string; startedAt: number; attempts: number } | null>(null)
+  const [recovery, setRecovery] = useState(false)
+  const [code, setCode] = useState("")
+
+  function restart(message: MessageKey | null) {
+    setChallenge(null)
+    setRecovery(false)
+    setCode("")
+    setPassword("")
+    setError(message)
+  }
 
   async function submit(event: FormEvent) {
     event.preventDefault()
     if (!username || !password || busy) return
     setBusy(true)
-    setError(false)
+    setError(null)
     try {
-      onAuthenticated(await api.login(username, password))
-    } catch {
-      setError(true)
+      const result = await api.login(username, password)
+      if ("twoFactorRequired" in result) setChallenge({ token: result.challenge, startedAt: Date.now(), attempts: 0 })
+      else onAuthenticated(result)
+    } catch (caught) {
+      setError(caught instanceof ApiError && caught.status === 429 ? "tooManyAttempts" : "loginError")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function submitCode(event: FormEvent) {
+    event.preventDefault()
+    const value = code.trim()
+    if (!challenge || !value || busy) return
+    if (Date.now() - challenge.startedAt >= CHALLENGE_LIFETIME_MS) return restart("twoFactorExpired")
+    setBusy(true)
+    setError(null)
+    try {
+      onAuthenticated(await api.loginSecondFactor(challenge.token, recovery ? { recoveryCode: value } : { code: value }))
+    } catch (caught) {
+      if (caught instanceof ApiError && caught.status === 429) setError("tooManyAttempts")
+      else if (challenge.attempts + 1 >= CHALLENGE_ATTEMPTS) restart("twoFactorExpired")
+      else {
+        setChallenge({ ...challenge, attempts: challenge.attempts + 1 })
+        setCode("")
+        setError("twoFactorError")
+      }
     } finally {
       setBusy(false)
     }
@@ -135,19 +175,411 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (session: Session) =>
           </div>
         </div>
         <Card width="100%" maxWidth={440} padding={8} className="login-card">
-          <form onSubmit={submit} className="form-stack">
-            <div>
-              <h1>{t("loginTitle")}</h1>
-              <p className="muted">{t("loginDescription")}</p>
-            </div>
-            <Field label={t("username")} value={username} onChange={setUsername} autoComplete="username" autoFocus required />
-            <Field label={t("password")} value={password} onChange={setPassword} type="password" autoComplete="current-password" required />
-            {error && <Banner status="error" title={t("loginError")} />}
-            <Button type="submit" variant="primary" size="lg" width="100%" label={busy ? t("signingIn") : t("signIn")} isLoading={busy} isDisabled={!username || !password} />
-          </form>
+          {challenge ? (
+            <form onSubmit={submitCode} className="form-stack">
+              <div>
+                <h1>{t("twoFactorTitle")}</h1>
+                <p className="muted">{t(recovery ? "twoFactorRecoveryPrompt" : "twoFactorPrompt")}</p>
+              </div>
+              <SecondFactorField key={recovery ? "recovery" : "code"} recovery={recovery} value={code} onChange={setCode} autoFocus />
+              {error && <Banner status="error" title={t(error)} />}
+              <Button type="submit" variant="primary" size="lg" width="100%" label={busy ? t("signingIn") : t("verify")} isLoading={busy} isDisabled={!code.trim()} />
+              <div className="login-alternatives">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  label={t(recovery ? "useAuthenticatorCode" : "useRecoveryCode")}
+                  onClick={() => {
+                    setRecovery(!recovery)
+                    setCode("")
+                    setError(null)
+                  }}
+                />
+                <Button variant="ghost" size="sm" label={t("backToSignIn")} onClick={() => restart(null)} />
+              </div>
+            </form>
+          ) : (
+            <form onSubmit={submit} className="form-stack">
+              <div>
+                <h1>{t("loginTitle")}</h1>
+                <p className="muted">{t("loginDescription")}</p>
+              </div>
+              <Field label={t("username")} value={username} onChange={setUsername} autoComplete="username" autoFocus required />
+              <Field label={t("password")} value={password} onChange={setPassword} type="password" autoComplete="current-password" required />
+              {error && <Banner status="error" title={t(error)} />}
+              <Button type="submit" variant="primary" size="lg" width="100%" label={busy ? t("signingIn") : t("signIn")} isLoading={busy} isDisabled={!username || !password} />
+            </form>
+          )}
         </Card>
       </section>
     </main>
+  )
+}
+
+function EnrollmentRequiredPage({ onEnrolled, onSignedOut }: { onEnrolled: () => Promise<void>; onSignedOut: () => void }) {
+  const { t } = useI18n()
+  async function logout() {
+    await api.logout().catch(() => undefined)
+    onSignedOut()
+  }
+  return (
+    <main className="login-page">
+      <section className="enrollment-page">
+        <Brand />
+        <Card width="100%" maxWidth={480} padding={8} className="login-card">
+          <div className="form-stack">
+            <div>
+              <h1>{t("enrollmentRequiredTitle")}</h1>
+              <p className="muted">{t("enrollmentRequiredText")}</p>
+            </div>
+            <TotpSetupFlow onDone={() => void onEnrolled()} onCancel={() => void logout()} cancelLabel={t("logout")} />
+          </div>
+        </Card>
+      </section>
+    </main>
+  )
+}
+
+function SecondFactorField({ recovery, value, onChange, autoFocus }: { recovery: boolean; value: string; onChange: (value: string) => void; autoFocus?: boolean }) {
+  const { t } = useI18n()
+  return recovery ? <Field label={t("recoveryCode")} value={value} onChange={onChange} autoComplete="off" autoFocus={autoFocus} required /> : <Field label={t("authenticatorCode")} value={value} onChange={onChange} autoComplete="one-time-code" inputMode="numeric" autoFocus={autoFocus} required />
+}
+
+function QrCode({ value, label }: { value: string; label: string }) {
+  const { size, path } = useMemo(() => {
+    const code = qrcode(0, "M")
+    code.addData(value)
+    code.make()
+    const count = code.getModuleCount()
+    let cells = ""
+    for (let row = 0; row < count; row += 1) for (let column = 0; column < count; column += 1) if (code.isDark(row, column)) cells += `M${column} ${row}h1v1h-1z`
+    return { size: count, path: cells }
+  }, [value])
+  return (
+    <svg className="qr-code" role="img" aria-label={label} viewBox={`-4 -4 ${size + 8} ${size + 8}`} shapeRendering="crispEdges">
+      <rect x={-4} y={-4} width={size + 8} height={size + 8} fill="#fff" />
+      <path d={path} fill="#000" />
+    </svg>
+  )
+}
+
+function RecoveryCodesView({ codes, onDone }: { codes: string[]; onDone: () => void }) {
+  const { t } = useI18n()
+  const [copied, setCopied] = useState(false)
+  const text = `${codes.join("\n")}\n`
+  async function copy() {
+    await navigator.clipboard.writeText(text)
+    setCopied(true)
+  }
+  function download() {
+    const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }))
+    const link = document.createElement("a")
+    link.href = url
+    link.download = "lightbws-recovery-codes.txt"
+    link.click()
+    URL.revokeObjectURL(url)
+  }
+  return (
+    <div className="form-stack">
+      <Banner status="warning" title={t("recoveryCodesText")} />
+      <ul className="recovery-codes" aria-label={t("recoveryCodes")}>
+        {codes.map((code) => (
+          <li key={code}>
+            <code>{code}</code>
+          </li>
+        ))}
+      </ul>
+      <div className="dialog-actions">
+        <Button variant="ghost" icon={<Copy />} label={copied ? t("copied") : t("copy")} onClick={() => void copy()} />
+        <Button variant="ghost" icon={<FileDown />} label={t("download")} onClick={download} />
+        <Button variant="primary" label={t("recoveryCodesSaved")} onClick={onDone} />
+      </div>
+    </div>
+  )
+}
+
+function TotpSetupFlow({ onDone, onCancel, cancelLabel }: { onDone: () => void; onCancel: () => void; cancelLabel?: string }) {
+  const { t } = useI18n()
+  const [password, setPassword] = useState("")
+  const [enrollment, setEnrollment] = useState<TotpEnrollment | null>(null)
+  const [code, setCode] = useState("")
+  const [codes, setCodes] = useState<string[] | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function run(action: () => Promise<void>) {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      await action()
+    } catch (caught) {
+      setError(apiErrorText(caught, t))
+    } finally {
+      setBusy(false)
+    }
+  }
+  function begin(event: FormEvent) {
+    event.preventDefault()
+    if (password) void run(async () => setEnrollment(await api.setupTotp(password)))
+  }
+  function confirm(event: FormEvent) {
+    event.preventDefault()
+    if (code.trim())
+      void run(async () => {
+        try {
+          setCodes((await api.confirmTotp(code.trim())).recoveryCodes)
+        } finally {
+          setCode("")
+        }
+      })
+  }
+
+  if (codes) return <RecoveryCodesView codes={codes} onDone={onDone} />
+  if (enrollment)
+    return (
+      <form className="form-stack" onSubmit={confirm} noValidate>
+        <p className="muted">{t("scanQrCode")}</p>
+        <QrCode value={enrollment.uri} label={t("qrCodeLabel")} />
+        <div>
+          <small className="muted">{t("setupKey")}</small>
+          <div className="token-box">
+            <code>{enrollment.secret}</code>
+          </div>
+        </div>
+        {error && <Banner status="error" title={error} />}
+        <SecondFactorField recovery={false} value={code} onChange={setCode} autoFocus />
+        <div className="dialog-actions">
+          <Button variant="ghost" label={cancelLabel || t("cancel")} onClick={onCancel} isDisabled={busy} />
+          <Button type="submit" variant="primary" label={t("verify")} isLoading={busy} isDisabled={!code.trim()} />
+        </div>
+      </form>
+    )
+  return (
+    <form className="form-stack" onSubmit={begin} noValidate>
+      <p className="muted">{t("confirmPasswordToContinue")}</p>
+      {error && <Banner status="error" title={error} />}
+      <Field label={t("currentPassword")} value={password} onChange={setPassword} type="password" autoComplete="current-password" autoFocus required />
+      <div className="dialog-actions">
+        <Button variant="ghost" label={cancelLabel || t("cancel")} onClick={onCancel} isDisabled={busy} />
+        <Button type="submit" variant="primary" label={t("continue")} isLoading={busy} isDisabled={!password} />
+      </div>
+    </form>
+  )
+}
+
+type SecurityAction = "setup" | "disable" | "regenerate" | "password"
+
+function SecurityPanel({ notify }: { notify: (text: string, error?: boolean) => void }) {
+  const { t } = useI18n()
+  const [status, setStatus] = useState<TwoFactorStatus | null>(null)
+  const [action, setAction] = useState<SecurityAction | null>(null)
+  const load = useCallback(
+    () =>
+      api
+        .twoFactorStatus()
+        .then(setStatus)
+        .catch(() => notify(t("genericError"), true)),
+    [notify, t],
+  )
+  useEffect(() => {
+    void load()
+  }, [load])
+  function finished(message?: MessageKey) {
+    setAction(null)
+    if (message) notify(t(message))
+    void load()
+  }
+  return (
+    <article className="panel settings-panel">
+      <div>
+        <p className="eyebrow">2FA</p>
+        <h2>{t("security")}</h2>
+        <p>{t("securityText")}</p>
+      </div>
+      <div className="security-stack">
+        <div className="security-row">
+          <div>
+            <strong>
+              {t("twoFactor")} <span className="status-pill" data-status={status?.enabled ? "active" : "disabled"}><i />{t(status?.enabled ? "twoFactorOn" : "twoFactorOff")}</span>
+            </strong>
+            <p className="muted">{t(status?.enabled ? "twoFactorOnText" : "twoFactorOffText")}</p>
+            {status?.enabled && status.required && <p className="muted">{t("twoFactorRequiredNote")}</p>}
+          </div>
+          {status && !status.totpEnabled && <Button variant="primary" icon={<ShieldCheck />} label={t("setUpAuthenticator")} onClick={() => setAction("setup")} />}
+          {status?.totpEnabled && !status.required && <Button variant="ghost" label={t("turnOffTwoFactor")} onClick={() => setAction("disable")} />}
+        </div>
+        {status?.totpEnabled && (
+          <div className="security-row">
+            <div>
+              <strong>
+                {t("recoveryCodesRemaining")}: {status.recoveryCodesRemaining}
+              </strong>
+              <p className="muted">{t("regenerateRecoveryCodesText")}</p>
+            </div>
+            <Button variant="ghost" icon={<RefreshCw />} label={t("regenerateRecoveryCodes")} onClick={() => setAction("regenerate")} />
+          </div>
+        )}
+        <div className="security-row">
+          <div>
+            <strong>{t("password")}</strong>
+            <p className="muted">{t("changePasswordText")}</p>
+          </div>
+          <Button variant="ghost" icon={<KeyRound />} label={t("changePassword")} onClick={() => setAction("password")} />
+        </div>
+      </div>
+      {action === "setup" && (
+        <Modal title={t("setUpAuthenticator")} onClose={() => finished()}>
+          <TotpSetupFlow onDone={() => finished("twoFactorEnabled")} onCancel={() => finished()} />
+        </Modal>
+      )}
+      {action === "disable" && <DisableTwoFactorDialog onClose={() => setAction(null)} onDone={() => finished("twoFactorDisabled")} />}
+      {action === "regenerate" && <RegenerateRecoveryCodesDialog onClose={() => finished()} />}
+      {action === "password" && status && <ChangePasswordDialog needsCode={status.enabled} onClose={() => setAction(null)} onDone={() => finished("passwordChanged")} />}
+    </article>
+  )
+}
+
+function SecondFactorChoice({ value, onChange, recovery, onRecovery }: { value: string; onChange: (value: string) => void; recovery: boolean; onRecovery: (value: boolean) => void }) {
+  const { t } = useI18n()
+  return (
+    <div className="form-stack">
+      <SecondFactorField key={recovery ? "recovery" : "code"} recovery={recovery} value={value} onChange={onChange} />
+      <div>
+        <Button
+          variant="ghost"
+          size="sm"
+          label={t(recovery ? "useAuthenticatorCode" : "useRecoveryCode")}
+          onClick={() => {
+            onRecovery(!recovery)
+            onChange("")
+          }}
+        />
+      </div>
+    </div>
+  )
+}
+
+function proofOf(value: string, recovery: boolean): SecondFactorProof {
+  return recovery ? { recoveryCode: value.trim() } : { code: value.trim() }
+}
+
+function DisableTwoFactorDialog({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+  const { t } = useI18n()
+  const [password, setPassword] = useState("")
+  const [code, setCode] = useState("")
+  const [recovery, setRecovery] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    if (busy || !password || !code.trim()) return
+    setBusy(true)
+    setError(null)
+    try {
+      await api.disableTotp(password, proofOf(code, recovery))
+      onDone()
+    } catch (caught) {
+      setCode("")
+      setError(apiErrorText(caught, t))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <Modal title={`${t("turnOffTwoFactor")} · ${t("twoFactor")}`} onClose={onClose}>
+      <form className="form-stack" onSubmit={submit} noValidate>
+        <Banner status="warning" title={t("turnOffTwoFactorText")} />
+        {error && <Banner status="error" title={error} />}
+        <Field label={t("currentPassword")} value={password} onChange={setPassword} type="password" autoComplete="current-password" autoFocus required />
+        <SecondFactorChoice value={code} onChange={setCode} recovery={recovery} onRecovery={setRecovery} />
+        <div className="dialog-actions">
+          <Button variant="ghost" label={t("cancel")} onClick={onClose} isDisabled={busy} />
+          <Button type="submit" variant="destructive" label={t("turnOffTwoFactor")} isLoading={busy} isDisabled={!password || !code.trim()} />
+        </div>
+      </form>
+    </Modal>
+  )
+}
+
+function RegenerateRecoveryCodesDialog({ onClose }: { onClose: () => void }) {
+  const { t } = useI18n()
+  const [password, setPassword] = useState("")
+  const [code, setCode] = useState("")
+  const [codes, setCodes] = useState<string[] | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    if (busy || !password || !code.trim()) return
+    setBusy(true)
+    setError(null)
+    try {
+      setCodes((await api.regenerateRecoveryCodes(password, code.trim())).recoveryCodes)
+    } catch (caught) {
+      setCode("")
+      setError(apiErrorText(caught, t))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <Modal title={t("regenerateRecoveryCodes")} onClose={onClose}>
+      {codes ? (
+        <RecoveryCodesView codes={codes} onDone={onClose} />
+      ) : (
+        <form className="form-stack" onSubmit={submit} noValidate>
+          <p className="muted">{t("regenerateRecoveryCodesText")}</p>
+          {error && <Banner status="error" title={error} />}
+          <Field label={t("currentPassword")} value={password} onChange={setPassword} type="password" autoComplete="current-password" autoFocus required />
+          <SecondFactorField recovery={false} value={code} onChange={setCode} />
+          <div className="dialog-actions">
+            <Button variant="ghost" label={t("cancel")} onClick={onClose} isDisabled={busy} />
+            <Button type="submit" variant="primary" label={t("regenerateRecoveryCodes")} isLoading={busy} isDisabled={!password || !code.trim()} />
+          </div>
+        </form>
+      )}
+    </Modal>
+  )
+}
+
+function ChangePasswordDialog({ needsCode, onClose, onDone }: { needsCode: boolean; onClose: () => void; onDone: () => void }) {
+  const { t } = useI18n()
+  const [current, setCurrent] = useState("")
+  const [next, setNext] = useState("")
+  const [code, setCode] = useState("")
+  const [recovery, setRecovery] = useState(false)
+  const [touched, setTouched] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const nextError = passwordValidation(next, t)
+  const incomplete = !current || Boolean(nextError) || (needsCode && !code.trim())
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    setTouched(true)
+    if (busy || incomplete) return
+    setBusy(true)
+    setError(null)
+    try {
+      await api.changePassword({ currentPassword: current, newPassword: next, ...(needsCode ? proofOf(code, recovery) : {}) })
+      onDone()
+    } catch (caught) {
+      setCode("")
+      setError(apiErrorText(caught, t))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <Modal title={t("changePassword")} onClose={onClose}>
+      <form className="form-stack" onSubmit={submit} noValidate>
+        {error && <Banner status="error" title={error} />}
+        <Field label={t("currentPassword")} value={current} onChange={setCurrent} type="password" autoComplete="current-password" autoFocus required />
+        <Field label={t("newPassword")} value={next} onChange={setNext} onBlur={() => setTouched(true)} type="password" autoComplete="new-password" required hint={t("passwordRequirement")} error={touched ? nextError : undefined} />
+        {needsCode && <SecondFactorChoice value={code} onChange={setCode} recovery={recovery} onRecovery={setRecovery} />}
+        <DialogActions onClose={onClose} busy={busy} disabled={incomplete} />
+      </form>
+    </Modal>
   )
 }
 
@@ -246,7 +678,7 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut: ()
         {page === "help" && <HelpPage {...pageProps} />}
         {page === "backups" && isAdmin && <BackupsPage {...pageProps} />}
         {page === "transfer" && isAdmin && <TransferPage {...pageProps} />}
-        {page === "settings" && <SettingsPage />}
+        {page === "settings" && <SettingsPage {...pageProps} />}
       </main>
       {notice && (
         <div className="toast" data-error={notice.error || undefined} role={notice.error ? "alert" : "status"}>
@@ -1444,6 +1876,8 @@ function UsersPage({ currentUser, notify }: { currentUser: User; notify: (text: 
   const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState<User | "new" | null>(null)
   const [passwordUser, setPasswordUser] = useState<User | null>(null)
+  const [resetUser, setResetUser] = useState<User | null>(null)
+  const [resetting, setResetting] = useState(false)
   const load = useCallback(
     () =>
       api
@@ -1481,6 +1915,20 @@ function UsersPage({ currentUser, notify }: { currentUser: User; notify: (text: 
     setPasswordUser(null)
     notify(t("passwordResetComplete"))
   }
+  async function resetTwoFactor() {
+    if (!resetUser || resetting) return
+    setResetting(true)
+    try {
+      await api.resetUserTwoFactor(resetUser.id)
+      notify(t("twoFactorResetComplete"))
+      setResetUser(null)
+      await load()
+    } catch (caught) {
+      notify(apiErrorText(caught, t), true)
+    } finally {
+      setResetting(false)
+    }
+  }
   return (
     <div className="page">
       <PageHeader
@@ -1505,6 +1953,7 @@ function UsersPage({ currentUser, notify }: { currentUser: User; notify: (text: 
                   <th>{t("username")}</th>
                   <th>{t("role")}</th>
                   <th>{t("lastUsed")}</th>
+                  <th>{t("twoFactor")}</th>
                   <th>{t("status")}</th>
                   <th className="action-column">{t("actions")}</th>
                 </tr>
@@ -1524,6 +1973,7 @@ function UsersPage({ currentUser, notify }: { currentUser: User; notify: (text: 
                     <td>{item.username}</td>
                     <td>{item.role === "admin" ? t("administrator") : t("member")}</td>
                     <td>{item.lastLoginAt ? formatDate(item.lastLoginAt) : t("never")}</td>
+                    <td>{t(item.twoFactorEnabled ? "twoFactorOn" : "twoFactorOff")}</td>
                     <td>
                       <StatusPill value={item.disabled ? "disabled" : "active"} />
                     </td>
@@ -1531,6 +1981,7 @@ function UsersPage({ currentUser, notify }: { currentUser: User; notify: (text: 
                       <RowActions>
                         <IconButton variant="ghost" label={t("edit")} icon={<UserCog />} onClick={() => setEditing(item)} />
                         <Button size="sm" variant="ghost" label={t("resetPassword")} onClick={() => setPasswordUser(item)} />
+                        {item.twoFactorEnabled && item.id !== currentUser.id && <Button size="sm" variant="ghost" label={t("resetTwoFactor")} onClick={() => setResetUser(item)} />}
                       </RowActions>
                     </td>
                   </tr>
@@ -1541,6 +1992,7 @@ function UsersPage({ currentUser, notify }: { currentUser: User; notify: (text: 
         </>
       )}
       {editing && <UserDialog item={editing === "new" ? null : editing} currentUser={currentUser} onClose={() => setEditing(null)} onSave={save} />}
+      {resetUser && <ConfirmActionDialog title={`${t("resetTwoFactor")} · ${resetUser.displayName}`} description={t("confirmResetTwoFactor")} actionLabel={t("resetTwoFactor")} busy={resetting} onAction={() => void resetTwoFactor()} onClose={() => setResetUser(null)} />}
       {passwordUser && <NameDialog title={t("resetPassword")} label={t("newPassword")} type="password" onClose={() => setPasswordUser(null)} onSave={password} />}
     </div>
   )
@@ -3173,7 +3625,7 @@ async function readMasterKey(file: File | null) {
   return file ? (await file.text()).trim() : ""
 }
 
-function SettingsPage() {
+function SettingsPage({ notify }: { notify: (text: string, error?: boolean) => void }) {
   const { locale, setLocale, t } = useI18n()
   const { mode, setMode } = useTheme()
   const modes: Array<{ value: ThemeMode; icon: ReactNode; label: MessageKey }> = [
@@ -3194,6 +3646,7 @@ function SettingsPage() {
     <div className="page">
       <PageHeader title={t("settings")} description={t("appearanceText")} />
       <section className="settings-stack">
+        <SecurityPanel notify={notify} />
         <article className="panel settings-panel">
           <div>
             <p className="eyebrow">ASTRYX</p>
@@ -3570,6 +4023,8 @@ function passphraseValidation(value: string, t: (key: MessageKey) => string) {
 
 function apiErrorText(error: unknown, t: (key: MessageKey) => string) {
   if (error instanceof ApiError) {
+    if (error.code === "INVALID_CREDENTIALS") return t("incorrectCredentials")
+    if (error.status === 429) return t("tooManyAttempts")
     if (error.status === 409) return t("conflictError")
     if (error.status === 422) return t("validationError")
     if (error.status === 401 || error.status === 403) return t("permissionError")

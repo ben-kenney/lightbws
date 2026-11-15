@@ -4,6 +4,7 @@ pub mod auth;
 pub mod backups;
 pub mod sdk;
 pub mod transfer;
+pub mod two_factor;
 pub mod web_data;
 
 use axum::Router;
