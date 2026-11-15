@@ -481,8 +481,10 @@ async fn update_secret(
     auth: SdkAuth,
     Json(input): Json<UpdateSecretRequest>,
 ) -> Result<Json<SdkSecret>, AppError> {
+    // The client-supplied flag is not trusted; the repository compares the content itself.
     let _ = input.value_changed;
-    let repository = SecretRepository::new(state.db.clone());
+    let repository =
+        SecretRepository::new(state.db.clone()).acting_as(AuditActor::Machine(auth.machine.id));
     let existing = repository.get(id).await?;
     AccessRepository::new(state.db.clone())
         .machine_secret(&auth.machine, &existing)

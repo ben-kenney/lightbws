@@ -16,7 +16,9 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("failed to create {}", config.data_dir.display()))?;
     let organization_key = load_or_create_organization_key(&config).await?;
-    let db = Database::connect(&config.database_path(), organization_key).await?;
+    let db = Database::connect(&config.database_path(), organization_key)
+        .await?
+        .with_secret_history_limit(config.secret_history_limit);
     let users = UserRepository::new(db.clone());
     users.bootstrap(config.bootstrap_admin.as_ref()).await?;
     let master_key = MasterKey::load_or_create(&config)?;

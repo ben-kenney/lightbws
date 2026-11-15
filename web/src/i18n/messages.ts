@@ -394,6 +394,21 @@ const en = {
   accessSaved: "Access policy saved",
   noAccess: "No access",
   noGrantees: "No eligible identities are available.",
+  secretHistory: "Version history",
+  secretHistoryHint: "Earlier versions are kept when the key, value or note changes. History contains old secret values until it ages out or an administrator clears it.",
+  emptySecretHistory: "No earlier versions yet. A version is saved each time the key, value or note changes.",
+  secretVersion: "Version",
+  secretVersionReplaced: "Replaced",
+  secretVersionReplacedBy: "Replaced by",
+  secretVersionChanged: "Fields changed",
+  revealSecretVersion: "Show this version",
+  hideSecretVersion: "Hide this version",
+  restoreSecretVersion: "Restore this version",
+  confirmRestoreSecretVersion: "Make this version the current key, value and note? The current content is kept as a new version, so this can be undone.",
+  secretVersionRestored: "Version restored",
+  clearSecretHistory: "Clear history",
+  confirmClearSecretHistory: "Delete every earlier version of this secret? The current value is not affected. This cannot be undone.",
+  secretHistoryCleared: "Version history cleared",
 } as const
 
 const zh: Record<keyof typeof en, string> = {
@@ -792,6 +807,21 @@ const zh: Record<keyof typeof en, string> = {
   accessSaved: "访问策略已保存",
   noAccess: "无权限",
   noGrantees: "当前没有可授权的身份。",
+  secretHistory: "版本历史",
+  secretHistoryHint: "密钥名称、值或备注变更时会保留之前的版本。历史中包含旧的密钥值，直到超出保留数量或由管理员清空。",
+  emptySecretHistory: "还没有历史版本。每次密钥名称、值或备注变更时都会保存一个版本。",
+  secretVersion: "版本",
+  secretVersionReplaced: "被替换时间",
+  secretVersionReplacedBy: "替换者",
+  secretVersionChanged: "变更字段",
+  revealSecretVersion: "显示此版本",
+  hideSecretVersion: "隐藏此版本",
+  restoreSecretVersion: "恢复此版本",
+  confirmRestoreSecretVersion: "将此版本恢复为当前的密钥名称、值和备注？当前内容会保存为新版本，因此可以撤销。",
+  secretVersionRestored: "版本已恢复",
+  clearSecretHistory: "清空历史",
+  confirmClearSecretHistory: "删除此密钥的全部历史版本？当前值不受影响。此操作无法撤销。",
+  secretHistoryCleared: "版本历史已清空",
 }
 
 export const messages = { en, "zh-CN": zh }

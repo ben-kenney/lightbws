@@ -7,6 +7,8 @@ use anyhow::{Context, Result, bail};
 use axum::http::HeaderName;
 use secrecy::SecretString;
 
+use crate::domain::secret_history::{DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT};
+
 #[derive(Clone)]
 pub struct BootstrapAdmin {
     pub username: String,
@@ -26,6 +28,8 @@ pub struct Config {
     pub ip_header: Option<HeaderName>,
     /// Optional file that receives a plain-text copy of the log, for tools such as fail2ban.
     pub log_file: Option<PathBuf>,
+    /// Earlier versions kept per secret. Zero stops recording history.
+    pub secret_history_limit: u32,
 }
 
 impl Config {
@@ -60,6 +64,10 @@ impl Config {
             .map(|name| parse_ip_header(&name))
             .transpose()?;
         let log_file = env_value("LIGHTBWS_LOG_FILE").map(PathBuf::from);
+        let secret_history_limit = env_value("LIGHTBWS_SECRET_HISTORY_LIMIT")
+            .map(|value| parse_history_limit(&value))
+            .transpose()?
+            .unwrap_or(DEFAULT_HISTORY_LIMIT);
         Ok(Self {
             bind,
             data_dir,
@@ -70,6 +78,7 @@ impl Config {
             organization_key_file,
             ip_header,
             log_file,
+            secret_history_limit,
         })
     }
 
@@ -145,6 +154,17 @@ pub fn parse_ip_header(value: &str) -> Result<HeaderName> {
     HeaderName::try_from(value.trim()).context("LIGHTBWS_IP_HEADER is not a valid header name")
 }
 
+pub fn parse_history_limit(value: &str) -> Result<u32> {
+    value
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|limit| *limit <= MAX_HISTORY_LIMIT)
+        .with_context(|| {
+            format!("LIGHTBWS_SECRET_HISTORY_LIMIT must be a number from 0 to {MAX_HISTORY_LIMIT}")
+        })
+}
+
 fn env_value(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -177,13 +197,25 @@ impl std::fmt::Debug for Config {
             .field("organization_key_file", &self.organization_key_file)
             .field("ip_header", &self.ip_header)
             .field("log_file", &self.log_file)
+            .field("secret_history_limit", &self.secret_history_limit)
             .finish()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, parse_ip_header, validate_password, validate_username};
+    use super::{
+        Config, parse_history_limit, parse_ip_header, validate_password, validate_username,
+    };
+
+    #[test]
+    fn parses_the_secret_history_limit() {
+        assert_eq!(parse_history_limit(" 0 ").unwrap(), 0);
+        assert_eq!(parse_history_limit("1000").unwrap(), 1000);
+        assert!(parse_history_limit("1001").is_err());
+        assert!(parse_history_limit("-1").is_err());
+        assert!(parse_history_limit("many").is_err());
+    }
 
     #[test]
     fn validates_bootstrap_credentials() {
@@ -218,6 +250,7 @@ mod tests {
             organization_key_file: key,
             ip_header: None,
             log_file: None,
+            secret_history_limit: 20,
         };
         assert!(config(None).organization_key_path().is_err());
         assert!(

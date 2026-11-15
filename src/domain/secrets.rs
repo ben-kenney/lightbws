@@ -10,7 +10,12 @@ use crate::{
         Database,
         entities::{project, secret},
     },
-    domain::{access::Permission, next_sdk_revision, now},
+    domain::{
+        access::Permission,
+        audit::AuditActor,
+        next_sdk_revision, now,
+        secret_history::{SecretContent, find_version, record_replaced},
+    },
     error::AppError,
     sdk_crypto::OrganizationKey,
 };
@@ -33,11 +38,22 @@ pub struct WebSecret {
 #[derive(Clone)]
 pub struct SecretRepository {
     db: Database,
+    actor: AuditActor,
 }
 
 impl SecretRepository {
     pub fn new(db: Database) -> Self {
-        Self { db }
+        Self {
+            db,
+            actor: AuditActor::System,
+        }
+    }
+
+    /// Names who is making changes, so replaced content is attributed in the version history.
+    /// Without it changes are attributed to the system.
+    pub fn acting_as(mut self, actor: AuditActor) -> Self {
+        self.actor = actor;
+        self
     }
 
     pub async fn list(
@@ -186,14 +202,15 @@ impl SecretRepository {
             .one(&transaction)
             .await?
             .ok_or(AppError::NotFound)?;
+        let content = SecretContent::Plain {
+            key: key.trim().into(),
+            value: value.into(),
+            note: note.into(),
+        };
+        self.record_replaced(&transaction, &model, &content).await?;
         let revision_nanos = next_sdk_revision(&transaction).await?;
         let mut active = model.into_active_model();
-        active.key_cipher = Set(None);
-        active.value_cipher = Set(None);
-        active.note_cipher = Set(None);
-        active.key_plain = Set(Some(key.trim().into()));
-        active.value_plain = Set(Some(value.into()));
-        active.note_plain = Set(Some(note.into()));
+        content.apply(&mut active);
         active.project_id = Set(project_id.map(|id| id.to_string()));
         active.updated_at = Set(now());
         active.revision_nanos = Set(revision_nanos);
@@ -251,20 +268,60 @@ impl SecretRepository {
             .one(&transaction)
             .await?
             .ok_or(AppError::NotFound)?;
+        let content = SecretContent::Cipher { key, value, note };
+        self.record_replaced(&transaction, &model, &content).await?;
         let revision_nanos = next_sdk_revision(&transaction).await?;
         let mut active = model.into_active_model();
-        active.key_cipher = Set(Some(key));
-        active.value_cipher = Set(Some(value));
-        active.note_cipher = Set(Some(note));
-        active.key_plain = Set(None);
-        active.value_plain = Set(None);
-        active.note_plain = Set(None);
+        content.apply(&mut active);
         active.project_id = Set(project_id.map(|id| id.to_string()));
         active.updated_at = Set(now());
         active.revision_nanos = Set(revision_nanos);
         let model = active.update(&transaction).await?;
         transaction.commit().await?;
         Ok(model)
+    }
+
+    /// Makes an earlier version the current content again. The content it replaces becomes a new
+    /// version, so a restore can itself be undone. Only key, value and note change; the project
+    /// and the access policy stay as they are.
+    pub async fn restore_version(&self, id: Uuid, version: i64) -> Result<WebSecret, AppError> {
+        let transaction = self.db.connection().begin().await?;
+        let model = secret::Entity::find_by_id(id.to_string())
+            .one(&transaction)
+            .await?
+            .ok_or(AppError::NotFound)?;
+        let stored = find_version(&transaction, id, version).await?;
+        let content = SecretContent::of_version(&stored)?.in_mode_of(
+            &SecretContent::of_secret(&model)?,
+            self.db.organization_key(),
+        )?;
+        self.record_replaced(&transaction, &model, &content).await?;
+        let revision_nanos = next_sdk_revision(&transaction).await?;
+        let timestamp = now().max(model.updated_at);
+        let mut active = model.into_active_model();
+        content.apply(&mut active);
+        active.updated_at = Set(timestamp);
+        active.revision_nanos = Set(revision_nanos);
+        let model = active.update(&transaction).await?;
+        transaction.commit().await?;
+        WebSecret::from_model(model, self.db.organization_key())
+    }
+
+    async fn record_replaced(
+        &self,
+        connection: &impl sea_orm::ConnectionTrait,
+        existing: &secret::Model,
+        replacement: &SecretContent,
+    ) -> Result<bool, AppError> {
+        record_replaced(
+            connection,
+            existing,
+            replacement,
+            self.db.organization_key(),
+            self.actor,
+            self.db.secret_history_limit(),
+        )
+        .await
     }
 
     pub async fn set_deleted(&self, ids: &[Uuid], deleted: bool) -> Result<(), AppError> {

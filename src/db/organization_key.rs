@@ -4,7 +4,7 @@ use sea_orm::{
     DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, Statement, TransactionTrait,
 };
 
-use super::entities::{machine_access_token, machine_session, project, secret};
+use super::entities::{machine_access_token, machine_session, project, secret, secret_version};
 use crate::{
     domain::{ORGANIZATION_ID, now},
     sdk_crypto::{OrganizationKey, legacy},
@@ -13,7 +13,8 @@ use crate::{
 const KEY_CHECK_PLAINTEXT: &str = "lightbws-organization-key-check-v1";
 
 /// What binding a database to its organization key changed. Counts are per ciphertext column
-/// value (`name_cipher`, `key_cipher`, `value_cipher`, `note_cipher`).
+/// value (`name_cipher`, `key_cipher`, `value_cipher`, `note_cipher`), including the secret
+/// version history.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct KeyMigrationReport {
     /// Values that decrypted under the published legacy key before the migration.
@@ -65,6 +66,26 @@ pub(super) async fn bind(
     }
     for model in secret::Entity::find()
         .filter(secret::Column::KeyCipher.is_not_null())
+        .all(&transaction)
+        .await?
+    {
+        let key_cipher = reencrypt(model.key_cipher.as_deref(), key, &mut report)?;
+        let value_cipher = reencrypt(model.value_cipher.as_deref(), key, &mut report)?;
+        let note_cipher = reencrypt(model.note_cipher.as_deref(), key, &mut report)?;
+        if key_cipher != model.key_cipher
+            || value_cipher != model.value_cipher
+            || note_cipher != model.note_cipher
+        {
+            let mut active = model.into_active_model();
+            active.key_cipher = Set(key_cipher);
+            active.value_cipher = Set(value_cipher);
+            active.note_cipher = Set(note_cipher);
+            active.update(&transaction).await?;
+        }
+    }
+    // History holds earlier secret values, so it must leave the published key as well.
+    for model in secret_version::Entity::find()
+        .filter(secret_version::Column::KeyCipher.is_not_null())
         .all(&transaction)
         .await?
     {
@@ -188,6 +209,15 @@ async fn count_legacy(connection: &impl ConnectionTrait) -> Result<u64> {
     }
     for model in secret::Entity::find()
         .filter(secret::Column::KeyCipher.is_not_null())
+        .all(connection)
+        .await?
+    {
+        count += u64::from(is_legacy(model.key_cipher.as_deref()))
+            + u64::from(is_legacy(model.value_cipher.as_deref()))
+            + u64::from(is_legacy(model.note_cipher.as_deref()));
+    }
+    for model in secret_version::Entity::find()
+        .filter(secret_version::Column::KeyCipher.is_not_null())
         .all(connection)
         .await?
     {

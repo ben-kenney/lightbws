@@ -18,6 +18,8 @@ export interface Overview { projects: number; secrets: number; trash: number }
 export interface Permission { read: boolean; write: boolean }
 export interface Project { id: string; name: string; sdkEncrypted: boolean; deletedAt: number | null; createdAt: number; updatedAt: number; permissions: Permission }
 export interface Secret { id: string; projectId: string | null; key: string; value: string | null; note: string; sdkEncrypted: boolean; deletedAt: number | null; createdAt: number; updatedAt: number; permissions: Permission }
+export interface SecretVersion { version: number; projectId: string | null; actorKind: string; actorId: string | null; actorName: string | null; validFrom: number; replacedAt: number; keyChanged: boolean; valueChanged: boolean; noteChanged: boolean }
+export interface SecretVersionDetail { version: number; key: string; value: string | null; note: string; validFrom: number; replacedAt: number }
 export interface MachineAccount { id: string; name: string; clientId: string; lastUsedAt: number | null; revokedAt: number | null; compatibilityAccount: boolean; createdAt: number }
 export interface IssuedMachineAccount extends MachineAccount { accessToken: string }
 export interface MachineAccessToken { id: string; machineAccountId: string; name: string; expiresAt: number | null; lastUsedAt: number | null; revokedAt: number | null; createdAt: number }

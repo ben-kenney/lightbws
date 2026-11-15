@@ -18,16 +18,18 @@ use crate::{
             audit_event, audit_setting, backup_target, group, group_member, machine_access_token,
             machine_account, machine_group_grant, machine_session, machine_user_grant, project,
             project_group_grant, project_machine_grant, project_user_grant, secret,
-            secret_group_grant, secret_machine_grant, secret_user_grant, user,
+            secret_group_grant, secret_machine_grant, secret_user_grant, secret_version, user,
         },
     },
     domain::{
         ORGANIZATION_ID,
+        audit::AuditActor,
         backups::{
             BackupCredentials, BackupEncryption, BackupPublicConfig, decode_credentials,
             encode_credentials, validate_restored_target,
         },
         next_sdk_revision,
+        secret_history::{SecretContent, prune, record_replaced},
     },
     error::AppError,
     sdk_crypto::{OrganizationKey, legacy},
@@ -138,6 +140,10 @@ struct DatabaseDumpV3 {
     organization_key_fingerprint: Option<String>,
     projects: Vec<ProjectRecord>,
     secrets: Vec<SecretRecord>,
+    /// Earlier versions of the secrets above. History travels with secrets and needs no scope;
+    /// archives written before version history existed omit the section.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    secret_versions: Option<Vec<SecretVersionRecord>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     users: Option<Vec<user::Model>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -223,6 +229,25 @@ struct SecretRecord {
     revision_nanos: i64,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SecretVersionRecord {
+    id: String,
+    secret_id: String,
+    version: i64,
+    project_id: Option<String>,
+    key_cipher: Option<String>,
+    value_cipher: Option<String>,
+    note_cipher: Option<String>,
+    key_plain: Option<String>,
+    value_plain: Option<String>,
+    note_plain: Option<String>,
+    actor_kind: String,
+    actor_id: Option<String>,
+    valid_from: i64,
+    replaced_at: i64,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportSummary {
@@ -291,6 +316,8 @@ pub async fn dump_database_scoped(
     let transport = transport_key()?;
     let projects = export_projects(&transaction, db.organization_key(), &transport).await?;
     let secrets = export_secrets(&transaction, db.organization_key(), &transport).await?;
+    let secret_versions =
+        export_secret_versions(&transaction, db.organization_key(), &transport).await?;
     let users = optional_models::<user::Entity>(&transaction, scopes.identities).await?;
     let groups = optional_models::<group::Entity>(&transaction, scopes.identities).await?;
     let group_members =
@@ -370,6 +397,7 @@ pub async fn dump_database_scoped(
         organization_key_fingerprint: Some(db.organization_key().fingerprint()),
         projects,
         secrets,
+        secret_versions: Some(secret_versions),
         users,
         groups,
         group_members,
@@ -479,6 +507,7 @@ pub async fn import_database(db: &Database, bytes: &[u8]) -> Result<ImportSummar
             .one(&transaction)
             .await?
         {
+            record_overwritten(&transaction, db, &model, &record).await?;
             let mut active = model.into_active_model();
             apply_secret(&mut active, record, import_revision);
             active.update(&transaction).await?;
@@ -556,16 +585,31 @@ pub async fn import_database_scoped(
     for record in &dump.secrets {
         validate_secret_record(record)?;
     }
+    validate_secret_versions(&dump)?;
     let project_count = dump.projects.len();
     let secret_count = dump.secrets.len();
     let mut dump = dump;
     let transport = parse_transport_key(dump.sdk_transport_key.as_deref())?;
-    let unreadable_sdk_values = import_ciphers(
+    let mut unreadable_sdk_values = import_ciphers(
         &mut dump.projects,
         &mut dump.secrets,
         transport.as_ref(),
         db.organization_key(),
     )?;
+    for record in dump.secret_versions.iter_mut().flatten() {
+        for cipher in [
+            &mut record.key_cipher,
+            &mut record.value_cipher,
+            &mut record.note_cipher,
+        ] {
+            *cipher = import_cipher(
+                cipher.take(),
+                transport.as_ref(),
+                db.organization_key(),
+                &mut unreadable_sdk_values,
+            )?;
+        }
+    }
     let same_key = dump.organization_key_fingerprint.as_deref()
         == Some(db.organization_key().fingerprint().as_str());
     let mut revoked_access_tokens = 0;
@@ -619,13 +663,42 @@ pub async fn import_database_scoped(
         )
         .await?;
     }
+    // Content that this import replaces. It is recorded after the archive's own history so the
+    // version numbers of both do not collide.
+    let mut overwritten = Vec::new();
     for record in dump.secrets {
+        if let Some(existing) = secret::Entity::find_by_id(&record.id)
+            .one(&transaction)
+            .await?
+        {
+            let replacement = record_content(&record)?;
+            if !SecretContent::of_secret(&existing)?.same_as(&replacement, db.organization_key()) {
+                overwritten.push((existing, replacement));
+            }
+        }
         let mut active = secret::ActiveModel {
             id: Set(record.id.clone()),
             ..Default::default()
         };
         apply_secret(&mut active, record, None);
         upsert_model(&transaction, active).await?;
+    }
+    import_secret_versions(
+        &transaction,
+        dump.secret_versions.unwrap_or_default(),
+        db.secret_history_limit(),
+    )
+    .await?;
+    for (existing, replacement) in overwritten {
+        record_replaced(
+            &transaction,
+            &existing,
+            &replacement,
+            db.organization_key(),
+            AuditActor::System,
+            db.secret_history_limit(),
+        )
+        .await?;
     }
     upsert_models::<group::ActiveModel, _>(&transaction, dump.groups.unwrap_or_default()).await?;
     upsert_models::<group_member::ActiveModel, _>(
@@ -814,6 +887,120 @@ async fn export_secrets(
     Ok(records)
 }
 
+async fn export_secret_versions(
+    connection: &impl ConnectionTrait,
+    source: &OrganizationKey,
+    transport: &OrganizationKey,
+) -> Result<Vec<SecretVersionRecord>, AppError> {
+    let mut records = Vec::new();
+    for model in secret_version::Entity::find().all(connection).await? {
+        records.push(SecretVersionRecord {
+            id: model.id,
+            secret_id: model.secret_id,
+            version: model.version,
+            project_id: model.project_id,
+            key_cipher: export_cipher(model.key_cipher, source, transport)?,
+            value_cipher: export_cipher(model.value_cipher, source, transport)?,
+            note_cipher: export_cipher(model.note_cipher, source, transport)?,
+            key_plain: model.key_plain,
+            value_plain: model.value_plain,
+            note_plain: model.note_plain,
+            actor_kind: model.actor_kind,
+            actor_id: model.actor_id,
+            valid_from: model.valid_from,
+            replaced_at: model.replaced_at,
+        });
+    }
+    Ok(records)
+}
+
+/// Stores the archive's history. A secret's archived history replaces what the destination
+/// holds for it, unless the destination has versions of its own that the archive does not know
+/// (a merge into an instance that kept changing); those are kept and the archived ones skipped.
+async fn import_secret_versions(
+    connection: &impl ConnectionTrait,
+    records: Vec<SecretVersionRecord>,
+    limit: u32,
+) -> Result<(), AppError> {
+    let mut by_secret = std::collections::BTreeMap::<String, Vec<SecretVersionRecord>>::new();
+    for record in records {
+        by_secret
+            .entry(record.secret_id.clone())
+            .or_default()
+            .push(record);
+    }
+    for (secret_id, records) in by_secret {
+        let existing = secret_version::Entity::find()
+            .filter(secret_version::Column::SecretId.eq(secret_id.clone()))
+            .all(connection)
+            .await?;
+        if existing
+            .iter()
+            .any(|model| !records.iter().any(|record| record.id == model.id))
+        {
+            continue;
+        }
+        secret_version::Entity::delete_many()
+            .filter(secret_version::Column::SecretId.eq(secret_id.clone()))
+            .exec(connection)
+            .await?;
+        for record in records {
+            secret_version::ActiveModel {
+                id: Set(record.id),
+                secret_id: Set(record.secret_id),
+                version: Set(record.version),
+                project_id: Set(record.project_id),
+                key_cipher: Set(record.key_cipher),
+                value_cipher: Set(record.value_cipher),
+                note_cipher: Set(record.note_cipher),
+                key_plain: Set(record.key_plain),
+                value_plain: Set(record.value_plain),
+                note_plain: Set(record.note_plain),
+                actor_kind: Set(record.actor_kind),
+                actor_id: Set(record.actor_id),
+                valid_from: Set(record.valid_from),
+                replaced_at: Set(record.replaced_at),
+            }
+            .insert(connection)
+            .await?;
+        }
+        if limit > 0 {
+            prune(connection, &secret_id, limit).await?;
+        }
+    }
+    Ok(())
+}
+
+fn record_content(record: &SecretRecord) -> Result<SecretContent, AppError> {
+    SecretContent::from_columns(
+        (
+            &record.key_cipher,
+            &record.value_cipher,
+            &record.note_cipher,
+        ),
+        (&record.key_plain, &record.value_plain, &record.note_plain),
+    )
+}
+
+/// Keeps the content an import is about to replace as a version of that secret.
+async fn record_overwritten(
+    connection: &impl ConnectionTrait,
+    db: &Database,
+    existing: &secret::Model,
+    record: &SecretRecord,
+) -> Result<(), AppError> {
+    record_replaced(
+        connection,
+        existing,
+        &record_content(record)?,
+        db.organization_key(),
+        AuditActor::System,
+        db.secret_history_limit(),
+    )
+    .await?;
+    Ok(())
+}
+
 /// Re-encrypts readable SDK ciphertext under the archive transport key. Opaque client
 /// ciphertext that the instance key cannot read is carried over unchanged.
 fn export_cipher(
@@ -976,6 +1163,56 @@ fn validate_v3_sections(dump: &DatabaseDumpV3) -> Result<(), AppError> {
         .ok_or_else(|| AppError::Validation("backup sections do not match declared scopes".into()))
 }
 
+fn validate_secret_versions(dump: &DatabaseDumpV3) -> Result<(), AppError> {
+    let Some(versions) = &dump.secret_versions else {
+        return Ok(());
+    };
+    let invalid = || AppError::Validation("invalid secret version record".into());
+    let secret_ids = dump
+        .secrets
+        .iter()
+        .map(|record| record.id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let mut ids = std::collections::HashSet::new();
+    let mut numbers = std::collections::HashSet::new();
+    for record in versions {
+        let is_uuid = |value: &str| uuid::Uuid::parse_str(value).is_ok();
+        let actor_valid = match (record.actor_kind.as_str(), record.actor_id.as_deref()) {
+            ("system", None) => true,
+            ("user" | "machine", Some(id)) => is_uuid(id),
+            _ => false,
+        };
+        let content = SecretRecord {
+            id: record.secret_id.clone(),
+            organization_id: ORGANIZATION_ID.into(),
+            project_id: record.project_id.clone(),
+            key_cipher: record.key_cipher.clone(),
+            value_cipher: record.value_cipher.clone(),
+            note_cipher: record.note_cipher.clone(),
+            key_plain: record.key_plain.clone(),
+            value_plain: record.value_plain.clone(),
+            note_plain: record.note_plain.clone(),
+            deleted_at: None,
+            created_at: 0,
+            updated_at: 0,
+            revision_nanos: 0,
+        };
+        if !is_uuid(&record.id)
+            || !secret_ids.contains(record.secret_id.as_str())
+            || record.version < 1
+            || record.valid_from < 0
+            || record.replaced_at < record.valid_from
+            || !actor_valid
+            || !ids.insert(record.id.as_str())
+            || !numbers.insert((record.secret_id.as_str(), record.version))
+            || validate_secret_record(&content).is_err()
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
 async fn clear_full_instance(connection: &impl ConnectionTrait) -> Result<(), AppError> {
     connection
         .execute_unprepared(
@@ -998,6 +1235,7 @@ async fn clear_full_instance(connection: &impl ConnectionTrait) -> Result<(), Ap
             DELETE FROM group_members;
             DELETE FROM groups;
             DELETE FROM sessions;
+            DELETE FROM secret_versions;
             DELETE FROM secrets;
             DELETE FROM projects;
             DELETE FROM users;

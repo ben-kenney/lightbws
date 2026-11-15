@@ -13,12 +13,13 @@ use sea_orm_migration::MigratorTrait;
 
 use self::migration::Migrator;
 pub use self::organization_key::KeyMigrationReport;
-use crate::sdk_crypto::OrganizationKey;
+use crate::{domain::secret_history::DEFAULT_HISTORY_LIMIT, sdk_crypto::OrganizationKey};
 
 #[derive(Clone)]
 pub struct Database {
     connection: DatabaseConnection,
     organization_key: OrganizationKey,
+    secret_history_limit: u32,
 }
 
 impl Database {
@@ -39,6 +40,7 @@ impl Database {
             Self {
                 connection,
                 organization_key,
+                secret_history_limit: DEFAULT_HISTORY_LIMIT,
             },
             report,
         ))
@@ -58,6 +60,16 @@ impl Database {
 
     pub fn organization_key(&self) -> &OrganizationKey {
         &self.organization_key
+    }
+
+    /// Sets how many earlier versions are kept per secret. Zero stops recording history.
+    pub fn with_secret_history_limit(mut self, limit: u32) -> Self {
+        self.secret_history_limit = limit;
+        self
+    }
+
+    pub fn secret_history_limit(&self) -> u32 {
+        self.secret_history_limit
     }
 }
 

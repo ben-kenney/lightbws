@@ -239,6 +239,9 @@ tbody tr { transition: background-color 140ms ease; }
 .row-actions,
 .card-actions,
 .dialog-actions { display: flex; align-items: center; justify-content: flex-end; gap: 0.35rem; white-space: nowrap; }
+.version-detail { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0.35rem 1rem; margin: 0; }
+.version-detail dt { color: var(--ink-muted); font-size: 0.8rem; }
+.version-detail dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
 .secret-value { display: inline-block; max-width: 18rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .empty-state { display: grid; min-height: 24rem; place-content: center; justify-items: center; padding: 2rem; text-align: center; }
 .empty-state > span { display: grid; place-items: center; width: 3.5rem; height: 3.5rem; margin-block-end: 1rem; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface-muted); color: var(--signal); }
