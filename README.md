@@ -170,9 +170,9 @@ Store the copy somewhere other than the database backups, such as a password man
 
 What this protects: leaked database files, volume snapshots, data-directory backups and container exports. What it does not protect: a compromised running host. The server holds the key in memory to serve plaintext to the Web UI, so anyone who controls the running process or can read the keyfile can read every Secret. Volume or disk encryption (LUKS, ZFS native encryption) is still worthwhile alongside it.
 
-### Upgrading from 0.2.6 or earlier
+### Upgrading from 0.2.7 or earlier
 
-Releases up to 0.2.6 encrypted every installation's data under one key derived from constants published in this repository, so the encrypted columns offered no protection against anyone holding a copy of the database. There are two ways to move that data under a per-instance key. Either way:
+Releases up to 0.2.7 encrypted every installation's data under one key derived from constants published in this repository, so the encrypted columns offered no protection against anyone holding a copy of the database. There are two ways to move that data under a per-instance key. Either way:
 
 - Every machine access token from the old installation is revoked. Mint new tokens in the Web UI and update the clients that use them.
 - `LIGHTBWS_ENABLE_UPSTREAM_COMPATIBILITY_ACCOUNT` has been removed, because its fixed public credentials could only work by exposing the organization key. LightBWS refuses to start while it is set to `true`.
@@ -191,7 +191,7 @@ The old release cannot read the database after this. Rolling back means restorin
 
 This leaves the old installation untouched until you retire it.
 
-1. On the 0.2.6 installation, open **Import & export**, choose **Full instance** as the scope, set a passphrase and download the encrypted export. The default scope carries only projects and Secrets; Full instance also carries users, groups, machine accounts, access policies, audit data and backup targets.
+1. On the 0.2.7 installation, open **Import & export**, choose **Full instance** as the scope, set a passphrase and download the encrypted export. The default scope carries only projects and Secrets; Full instance also carries users, groups, machine accounts, access policies, audit data and backup targets.
 2. Install the new release with its own data directory and keyfile volume, as in [Quick start](#quick-start), and back up its keyfile.
 3. On the new installation, open **Import & export**, choose the archive and enter the passphrase. To make the new installation an exact copy of the old one, select **Replace current durable data**; this replaces the users created at install time and signs everyone out, so sign in with an account from the old installation.
 4. LightBWS re-encrypts the imported project names and Secrets from the published key under the new organization key. Open a few Secrets in the Web UI to confirm they read correctly.
@@ -277,7 +277,7 @@ The authorization acceptance test uses the same `fnox.toml` throughout:
 - The default backup scope contains projects and secrets only. Optional scopes add users/groups/memberships, machine accounts, access policies, audit settings/events, and backup target configuration/credentials. The full-instance preset includes every persistent scope and can rebuild the durable database.
 - Sessions, machine sessions, backup-job history, migration metadata, SQLite WAL state, and `master.key` are never included in an archive.
 - Manual encrypted exports use an independent passphrase-derived Argon2id key and are portable between LightBWS installations. Import them with the same passphrase.
-- The organization keyfile is never included in an archive. Archives re-encrypt project names and Secrets under a one-off key stored inside the (encrypted) archive, and import re-encrypts them under the destination's organization key. Archives from 0.2.6 and earlier are re-encrypted from the published legacy key on import.
+- The organization keyfile is never included in an archive. Archives re-encrypt project names and Secrets under a one-off key stored inside the (encrypted) archive, and import re-encrypts them under the destination's organization key. Archives from 0.2.7 and earlier are re-encrypted from the published legacy key on import.
 - Machine access tokens wrap their instance's organization key. A full-instance restore keeps them usable only when the destination uses the source's keyfile; otherwise restored tokens are revoked and must be minted again.
 - Scheduled S3 and WebDAV snapshots are encrypted with the persistent instance master key. To restore one on another instance, provide the source instance's old `master.key`; it is used only to decrypt the selected archive and never replaces the destination key.
 - `master.key` is never embedded in or uploaded with a `.lightbws` archive. Back it up separately. Imported backup credentials are decrypted from the archive and re-encrypted with the destination instance's master key.
