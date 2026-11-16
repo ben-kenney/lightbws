@@ -22,6 +22,10 @@ A password-manager workflow looks like: browser → open a website → autofill 
 
 Use LightBWS for workloads such as injecting a database URL into a service, supplying an API token to GitHub Actions, or managing deployment credentials for a homelab. It is not a replacement for Bitwarden Password Manager: LightBWS does not provide a personal vault, browser autofill, passkey management, family password sharing, or breach monitoring. The two products are complementary. Password Manager protects credentials used by people, while Secrets Manager delivers credentials to software and automation.
 
+## Creation workflow
+
+Use **Create new** in navigation to create a secret, project, machine account, user, or group without searching through separate pages. Contextual **New** buttons open the same workflow. After creating a project, continue directly to adding a secret or configuring access; a secret form can also create and select a project without losing its draft. Open a project to filter its secrets and share the scoped URL. Administrators can still create secrets without a project.
+
 ## Screenshots
 
 ![LightBWS login](screenshoot/login-en.png)
@@ -87,7 +91,7 @@ docker compose pull
 docker compose up -d
 ```
 
-Set `LIGHTBWS_IMAGE=ghcr.io/ca-x/lightbws:0.2.6` in `.env` when a deployment must remain pinned to a specific release. Running `docker compose down` keeps the data volume; `docker compose down -v` permanently deletes it.
+Set `LIGHTBWS_IMAGE=ghcr.io/ca-x/lightbws:0.2.7` in `.env` when a deployment must remain pinned to a specific release. Running `docker compose down` keeps the data volume; `docker compose down -v` permanently deletes it.
 
 ### Release binary
 
@@ -344,8 +348,18 @@ After CI succeeds on `main`, pushing a semantic `vX.Y.Z` tag starts two release 
 
 ```bash
 git push origin main
-git tag -a v0.2.6 -m "LightBWS v0.2.6"
-git push origin v0.2.6
+git tag -a v0.2.7 -m "LightBWS v0.2.7"
+git push origin v0.2.7
 ```
+
+If a hosted runner is retired after a tag is published, update the release workflow and rerun it against that existing tag without moving the tag:
+
+```bash
+gh workflow run release.yml --ref main -f tag=v0.2.7
+```
+
+The recovery run validates the tag's package versions and pins every build to its resolved source commit; archive names and the release still use the selected tag.
+
+Publication rechecks the existing tag instead of sending a historical `target_commitish`, avoiding unnecessary workflow-write permissions.
 
 The Docker workflow builds `linux/amd64` and `linux/arm64` on native GitHub runners, then publishes the same multi-platform tags to `ghcr.io/ca-x/lightbws` and `docker.io/czyt/lightbws`. Repository or organization secrets named `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` are required. Each release archive contains the binary, both language READMEs, and the license, with a companion SHA-256 checksum asset. Frontend files are already embedded in the binary.
