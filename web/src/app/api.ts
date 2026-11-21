@@ -1,4 +1,4 @@
-import type { AccessPolicy, AccessPolicyInput, AuditEvent, AuditSettings, BackupCapabilities, BackupJob, BackupScopes, BackupTarget, Group, IssuedMachineAccessToken, IssuedMachineAccount, MachineAccess, MachineAccessInput, MachineAccessToken, MachineAccount, Overview, Project, Role, Secret, Session, User } from "./types"
+import type { AccessPolicy, AccessPolicyInput, AuditEvent, AuditSettings, BackupCapabilities, BackupJob, BackupScopes, BackupTarget, Group, IssuedMachineAccessToken, IssuedMachineAccount, MachineAccess, MachineAccessInput, MachineAccessToken, MachineAccount, Overview, Project, Role, Secret, SecretVersion, SecretVersionDetail, Session, User } from "./types"
 
 export class ApiError extends Error {
   constructor(public status: number, public code: string, public detail?: string) {
@@ -44,6 +44,10 @@ export const api = {
   trashSecret: (id: string) => request<void>(`/secrets/${id}`, { method: "DELETE" }),
   restoreSecret: (id: string) => request<void>(`/secrets/${id}/restore`, { method: "PUT" }),
   purgeSecret: (id: string) => request<void>(`/secrets/${id}/purge`, { method: "DELETE" }),
+  secretVersions: (id: string) => request<SecretVersion[]>(`/secrets/${id}/versions`),
+  secretVersion: (id: string, version: number) => request<SecretVersionDetail>(`/secrets/${id}/versions/${version}`),
+  restoreSecretVersion: (id: string, version: number) => request<Secret>(`/secrets/${id}/versions/${version}/restore`, { method: "POST" }),
+  clearSecretHistory: (id: string) => request<void>(`/secrets/${id}/versions`, { method: "DELETE" }),
   users: () => request<User[]>("/admin/users"),
   createUser: (input: { username: string; displayName: string; role: Role; password: string }) => request<User>("/admin/users", json("POST", input)),
   updateUser: (id: string, input: { displayName: string; role: Role; disabled: boolean }) => request<User>(`/admin/users/${id}`, json("PUT", input)),

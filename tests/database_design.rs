@@ -72,6 +72,7 @@ async fn schema_contains_every_record_table_and_supporting_structure() {
             "secret_group_grants",
             "secret_machine_grants",
             "secret_user_grants",
+            "secret_versions",
             "secrets",
             "sessions",
             "users",
@@ -259,6 +260,43 @@ async fn every_table_enforces_its_storage_invariants() {
         ),
     )
     .await;
+    let version = |columns: &str, values: &str| {
+        format!(
+            "INSERT INTO secret_versions (id, secret_id, version, actor_kind, valid_from, replaced_at, {columns}) VALUES ('{}', '{}', 1, 'system', 10, 10, {values})",
+            uuid::Uuid::new_v4(),
+            secret.id
+        )
+    };
+    db.connection()
+        .execute_unprepared(&version(
+            "key_plain, value_plain, note_plain",
+            "'K', 'v', ''",
+        ))
+        .await
+        .expect("valid secret version");
+    // A second row with the same version number, mixed representations and an incomplete
+    // representation are all refused.
+    assert_rejected(
+        &db,
+        version("key_plain, value_plain, note_plain", "'K', 'v', ''"),
+    )
+    .await;
+    assert_rejected(
+        &db,
+        version(
+            "key_plain, value_plain, note_plain, key_cipher",
+            "'K', 'v', '', '2.cipher'",
+        ),
+    )
+    .await;
+    assert_rejected(&db, version("key_plain, value_plain", "'K', 'v'")).await;
+    assert_rejected(
+        &db,
+        "UPDATE secret_versions SET replaced_at = valid_from - 1",
+    )
+    .await;
+    assert_rejected(&db, "UPDATE secret_versions SET actor_kind = 'user'").await;
+    assert_rejected(&db, "UPDATE secret_versions SET version = 0").await;
     assert_rejected(
         &db,
         format!(

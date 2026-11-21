@@ -46,6 +46,7 @@ impl Fixture {
             organization_key_file: None,
             ip_header,
             log_file: None,
+            secret_history_limit: 20,
             allow_plaintext_backups: false,
         };
         let state = AppState::new(db, &config);

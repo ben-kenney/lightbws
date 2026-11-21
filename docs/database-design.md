@@ -11,6 +11,10 @@ backup objects are derived views.
 - `users`, `sessions`, `groups`, and `group_members` model human identity and group inheritance.
 - `projects` belongs to the organization; `secrets` belongs to exactly one project. A secret does not
   duplicate `organization_id`, so project and secret organization membership cannot diverge.
+- `secret_versions` keeps a bounded history of each secret's earlier key, value, and note in the
+  same plaintext-or-ciphertext representation as `secrets`. It stores the project and the actor
+  that replaced the version as snapshots without foreign keys, so removing a project, user, or
+  machine never rewrites history.
 - Project and direct-secret policies use separate normalized join tables for users, groups, and
   machines. Composite primary keys are the uniqueness constraint and support resource-first reads.
 - Reverse indexes support actor-first permission evaluation without scanning every policy.
@@ -27,7 +31,8 @@ backup objects are derived views.
 
 - Removing a user or group cascades membership and grants, immediately revoking inherited access.
 - Removing a machine cascades sessions and grants.
-- Purging a project cascades its secrets; purging a secret cascades direct grants.
+- Purging a project cascades its secrets; purging a secret cascades direct grants and its version
+  history.
 - Organization removal is restricted while projects exist.
 - Backup target removal cascades its operational job history by explicit product policy.
 - Audit event deletion is blocked by a database trigger unless the cleanup guard is enabled inside
@@ -65,7 +70,9 @@ restoring the project preserves secrets that had already been individually delet
 
 ## Transaction Boundaries
 
-- Secret writes and global SDK revision allocation commit together.
+- Secret writes and global SDK revision allocation commit together. A write that changes the key,
+  value, or note stores the replaced content as a version and prunes versions beyond the configured
+  limit in the same transaction.
 - Project trash/restore and child secret state/revision changes commit together.
 - Group membership and policy replacement validate all references before delete-and-insert and commit
   atomically.
@@ -84,6 +91,7 @@ restoring the project preserves secrets that had already been individually delet
 | `sessions` | Web bearer sessions | Digest-only identifiers, expiry after creation, user cascade, user and global expiry indexes |
 | `projects` | Secret grouping and policy boundary | Exactly one plaintext/ciphertext representation, organization FK, soft-delete timeline, organization/list index |
 | `secrets` | Sensitive key-value records | Exactly one project, bounded plaintext/ciphertext representation, soft-delete timeline, project/list/revision indexes |
+| `secret_versions` | Earlier content of a secret | Unique `(secret_id, version)`, same representation and length checks as `secrets`, closed actor kinds, `replaced_at` not before `valid_from`, cascade on secret purge |
 | `machine_accounts` | Non-human identities | Unique name/client ID, digest-only credential, creator restriction, revocation/compatibility checks |
 | `machine_sessions` | SDK bearer sessions | Digest-only identifiers, expiry after creation, account cascade, account and global expiry indexes |
 | `groups` | User inheritance groups | Case-insensitive name uniqueness and monotonic timestamps |

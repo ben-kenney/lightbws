@@ -9,7 +9,76 @@ impl MigratorTrait for Migrator {
             Box::new(InitialMigration),
             Box::new(BackupOptionsMigration),
             Box::new(OrganizationKeyMigration),
+            Box::new(SecretVersionsMigration),
         ]
+    }
+}
+
+struct SecretVersionsMigration;
+
+impl MigrationName for SecretVersionsMigration {
+    fn name(&self) -> &str {
+        "m20261115_000004_secret_versions"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for SecretVersionsMigration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(
+                r#"
+                CREATE TABLE secret_versions (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    secret_id TEXT NOT NULL,
+                    version BIGINT NOT NULL,
+                    project_id TEXT,
+                    key_cipher TEXT,
+                    value_cipher TEXT,
+                    note_cipher TEXT,
+                    key_plain VARCHAR(500),
+                    value_plain TEXT,
+                    note_plain TEXT,
+                    actor_kind TEXT NOT NULL CHECK(actor_kind IN ('user','machine','system')),
+                    actor_id TEXT,
+                    valid_from BIGINT NOT NULL,
+                    replaced_at BIGINT NOT NULL,
+                    CHECK(length(id) = 36),
+                    CHECK(length(secret_id) = 36),
+                    CHECK(version >= 1),
+                    CHECK(project_id IS NULL OR length(project_id) = 36),
+                    CHECK ((key_cipher IS NOT NULL AND value_cipher IS NOT NULL AND note_cipher IS NOT NULL
+                            AND key_plain IS NULL AND value_plain IS NULL AND note_plain IS NULL)
+                        OR (key_cipher IS NULL AND value_cipher IS NULL AND note_cipher IS NULL
+                            AND key_plain IS NOT NULL AND value_plain IS NOT NULL AND note_plain IS NOT NULL)),
+                    CHECK(key_cipher IS NULL OR length(key_cipher) BETWEEN 1 AND 32768),
+                    CHECK(value_cipher IS NULL OR length(value_cipher) BETWEEN 1 AND 2097152),
+                    CHECK(note_cipher IS NULL OR length(note_cipher) <= 131072),
+                    CHECK(key_plain IS NULL OR length(trim(key_plain)) BETWEEN 1 AND 500),
+                    CHECK(value_plain IS NULL OR length(value_plain) <= 1048576),
+                    CHECK(note_plain IS NULL OR length(note_plain) <= 65536),
+                    CHECK((actor_kind = 'system' AND actor_id IS NULL)
+                        OR (actor_kind IN ('user','machine') AND actor_id IS NOT NULL
+                            AND length(actor_id) = 36)),
+                    CHECK(valid_from >= 0),
+                    CHECK(replaced_at >= valid_from),
+                    CONSTRAINT fk_secret_version_secret FOREIGN KEY(secret_id) REFERENCES secrets(id) ON DELETE CASCADE
+                );
+                CREATE UNIQUE INDEX idx_secret_versions_secret_version
+                ON secret_versions(secret_id, version);
+                "#,
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared("DROP TABLE IF EXISTS secret_versions;")
+            .await?;
+        Ok(())
     }
 }
 

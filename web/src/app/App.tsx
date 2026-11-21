@@ -6,11 +6,11 @@ import { IconButton as BaseIconButton } from "@astryxdesign/core/IconButton"
 import { Skeleton } from "@astryxdesign/core/Skeleton"
 import { Tooltip } from "@astryxdesign/core/Tooltip"
 import { SpotlightTour, useSpotlight, type SpotlightStep } from "react-tourlight"
-import { ArchiveRestore, BookOpen, Boxes, Check, ChevronRight, CircleGauge, Clock3, CloudUpload, Copy, DatabaseBackup, Eye, EyeOff, ExternalLink, FileDown, FileUp, FolderKanban, Globe2, Info, KeyRound, Languages, LogOut, Menu, Monitor, Moon, MoveHorizontal, Network, Pencil, Plus, RefreshCw, ScrollText, Search, ServerCog, Settings, ShieldCheck, Sun, Trash2, UserCog, UsersRound, X } from "lucide-react"
+import { ArchiveRestore, BookOpen, Boxes, Check, ChevronRight, CircleGauge, Clock3, CloudUpload, Copy, DatabaseBackup, Eye, EyeOff, ExternalLink, FileDown, FileUp, FolderKanban, Globe2, History, Info, KeyRound, Languages, LogOut, Menu, Monitor, Moon, MoveHorizontal, Network, Pencil, Plus, RefreshCw, ScrollText, Search, ServerCog, Settings, ShieldCheck, Sun, Trash2, UserCog, UsersRound, X } from "lucide-react"
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ComponentProps, type FormEvent, type ReactNode } from "react"
 
 import { ApiError, api } from "./api"
-import type { AccessPolicy, AuditEvent, AuditSettings, BackupCapabilities, BackupConfig, BackupEncryption, BackupJob, BackupScopes, BackupTarget, GrantInput, Group, IssuedMachineAccessToken, IssuedMachineAccount, Locale, MachineAccessToken, MachineAccount, NamedGrant, Overview, Project, Role, Secret, Session, ThemeMode, User } from "./types"
+import type { AccessPolicy, AuditEvent, AuditSettings, BackupCapabilities, BackupConfig, BackupEncryption, BackupJob, BackupScopes, BackupTarget, GrantInput, Group, IssuedMachineAccessToken, IssuedMachineAccount, Locale, MachineAccessToken, MachineAccount, NamedGrant, Overview, Project, Role, Secret, SecretVersion, SecretVersionDetail, Session, ThemeMode, User } from "./types"
 import { useI18n } from "../i18n/I18nProvider"
 import type { MessageKey } from "../i18n/messages"
 import type { AstryxThemeName } from "../theme/astryxThemes"
@@ -729,6 +729,7 @@ function SecretsPage({ isAdmin, notify }: { isAdmin: boolean; notify: (text: str
   const [query, setQuery] = useState("")
   const [editing, setEditing] = useState<Secret | "new" | null>(null)
   const [accessItem, setAccessItem] = useState<Secret | null>(null)
+  const [historyItem, setHistoryItem] = useState<Secret | null>(null)
   const [revealed, setRevealed] = useState<Set<string>>(new Set())
   const load = useCallback(
     () =>
@@ -839,6 +840,7 @@ function SecretsPage({ isAdmin, notify }: { isAdmin: boolean; notify: (text: str
                             />
                           )}
                           {isAdmin && <IconButton variant="ghost" label={t("manageAccess")} icon={<ShieldCheck />} onClick={() => setAccessItem(item)} />}
+                          <IconButton variant="ghost" label={t("secretHistory")} icon={<History />} onClick={() => setHistoryItem(item)} />
                           {item.permissions.write && <IconButton variant="ghost" label={t("edit")} icon={<Pencil />} onClick={() => setEditing(item)} />}
                           {item.permissions.write && <IconButton variant="ghost" label={t("delete")} icon={<Trash2 />} onClick={() => void remove(item)} />}
                         </RowActions>
@@ -853,7 +855,154 @@ function SecretsPage({ isAdmin, notify }: { isAdmin: boolean; notify: (text: str
       )}
       {editing && <SecretDialog item={editing === "new" ? null : editing} projects={projects} allowUnassigned={isAdmin || (editing !== "new" && editing.projectId === null)} onClose={() => setEditing(null)} onSave={save} />}
       {isAdmin && accessItem && <ResourceAccessDialog resource={{ kind: "secret", id: accessItem.id, name: accessItem.key }} onClose={() => setAccessItem(null)} notify={notify} />}
+      {historyItem && <SecretHistoryDialog secret={historyItem} isAdmin={isAdmin} onClose={() => setHistoryItem(null)} onChanged={() => void load()} notify={notify} />}
     </div>
+  )
+}
+
+function SecretHistoryDialog({ secret, isAdmin, onClose, onChanged, notify }: { secret: Secret; isAdmin: boolean; onClose: () => void; onChanged: () => void; notify: (text: string, error?: boolean) => void }) {
+  const { t } = useI18n()
+  const [versions, setVersions] = useState<SecretVersion[] | null>(null)
+  const [details, setDetails] = useState<Record<number, SecretVersionDetail>>({})
+  const [restoring, setRestoring] = useState<SecretVersion | null>(null)
+  const [clearing, setClearing] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const load = useCallback(
+    () =>
+      api
+        .secretVersions(secret.id)
+        .then(setVersions)
+        .catch((error) => {
+          setVersions([])
+          notify(apiErrorText(error, t), true)
+        }),
+    [secret.id, notify, t],
+  )
+  useEffect(() => {
+    void load()
+  }, [load])
+  async function toggle(version: SecretVersion) {
+    if (details[version.version]) {
+      setDetails((current) => {
+        const next = { ...current }
+        delete next[version.version]
+        return next
+      })
+      return
+    }
+    try {
+      const detail = await api.secretVersion(secret.id, version.version)
+      setDetails((current) => ({ ...current, [version.version]: detail }))
+    } catch (error) {
+      notify(apiErrorText(error, t), true)
+    }
+  }
+  async function restore() {
+    if (!restoring) return
+    setBusy(true)
+    try {
+      await api.restoreSecretVersion(secret.id, restoring.version)
+      notify(t("secretVersionRestored"))
+      setRestoring(null)
+      setDetails({})
+      onChanged()
+      await load()
+    } catch (error) {
+      notify(apiErrorText(error, t), true)
+    } finally {
+      setBusy(false)
+    }
+  }
+  async function clear() {
+    setBusy(true)
+    try {
+      await api.clearSecretHistory(secret.id)
+      notify(t("secretHistoryCleared"))
+      setClearing(false)
+      setDetails({})
+      await load()
+    } catch (error) {
+      notify(apiErrorText(error, t), true)
+    } finally {
+      setBusy(false)
+    }
+  }
+  function changedFields(version: SecretVersion) {
+    const fields = [version.keyChanged && t("secretKey"), version.valueChanged && t("secretValue"), version.noteChanged && t("note")].filter(Boolean)
+    return fields.length ? fields.join(", ") : "—"
+  }
+  function actor(version: SecretVersion) {
+    if (version.actorKind === "system") return t("systemActor")
+    return `${version.actorKind === "user" ? t("user") : t("machineAccount")} ${version.actorName || shortId(version.actorId)}`
+  }
+  return (
+    <Modal title={`${t("secretHistory")} · ${secret.key}`} onClose={onClose} wide>
+      <div className="form-stack">
+        <p className="field-hint">{t("secretHistoryHint")}</p>
+        {versions === null ? (
+          <Skeleton />
+        ) : !versions.length ? (
+          <p>{t("emptySecretHistory")}</p>
+        ) : (
+          <TableScroll>
+            <table>
+              <thead>
+                <tr>
+                  <th>{t("secretVersion")}</th>
+                  <th>{t("secretVersionReplaced")}</th>
+                  <th>{t("secretVersionReplacedBy")}</th>
+                  <th>{t("secretVersionChanged")}</th>
+                  <th className="action-column">{t("actions")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {versions.map((version) => {
+                  const detail = details[version.version]
+                  return [
+                    <tr key={version.version}>
+                      <td>#{version.version}</td>
+                      <td>{formatDate(version.replacedAt)}</td>
+                      <td>{actor(version)}</td>
+                      <td>{changedFields(version)}</td>
+                      <td>
+                        <RowActions>
+                          <IconButton variant="ghost" label={t(detail ? "hideSecretVersion" : "revealSecretVersion")} icon={detail ? <EyeOff /> : <Eye />} onClick={() => void toggle(version)} />
+                          {secret.permissions.write && <IconButton variant="ghost" label={t("restoreSecretVersion")} icon={<ArchiveRestore />} onClick={() => setRestoring(version)} />}
+                        </RowActions>
+                      </td>
+                    </tr>,
+                    detail && (
+                      <tr key={`${version.version}-detail`}>
+                        <td colSpan={5}>
+                          <dl className="version-detail">
+                            <dt>{t("secretKey")}</dt>
+                            <dd>
+                              <code>{detail.key}</code>
+                            </dd>
+                            <dt>{t("secretValue")}</dt>
+                            <dd>
+                              <code>{detail.value === null ? "••••••••" : detail.value}</code>
+                            </dd>
+                            <dt>{t("note")}</dt>
+                            <dd>{detail.note || "—"}</dd>
+                          </dl>
+                        </td>
+                      </tr>
+                    ),
+                  ]
+                })}
+              </tbody>
+            </table>
+          </TableScroll>
+        )}
+        <div className="dialog-actions">
+          {isAdmin && Boolean(versions?.length) && <Button variant="ghost" label={t("clearSecretHistory")} onClick={() => setClearing(true)} />}
+          <Button variant="primary" label={t("close")} onClick={onClose} />
+        </div>
+      </div>
+      {restoring && <ConfirmActionDialog title={t("restoreSecretVersion")} description={`#${restoring.version} · ${t("confirmRestoreSecretVersion")}`} actionLabel={t("restore")} busy={busy} onAction={() => void restore()} onClose={() => setRestoring(null)} />}
+      {clearing && <ConfirmActionDialog title={t("clearSecretHistory")} description={t("confirmClearSecretHistory")} actionLabel={t("delete")} busy={busy} onAction={() => void clear()} onClose={() => setClearing(false)} />}
+    </Modal>
   )
 }
 

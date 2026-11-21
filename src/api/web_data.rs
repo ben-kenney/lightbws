@@ -14,6 +14,7 @@ use crate::{
         access::{AccessRepository, Permission},
         audit::{AuditActor, AuditRepository},
         projects::{ProjectRepository, WebProject},
+        secret_history::{SecretHistoryRepository, SecretVersionDetail, SecretVersionSummary},
         secrets::{SecretRepository, WebSecret},
     },
     error::AppError,
@@ -70,6 +71,15 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/secrets/{id}/restore", axum::routing::put(restore_secret))
         .route("/secrets/{id}/purge", axum::routing::delete(purge_secret))
+        .route(
+            "/secrets/{id}/versions",
+            get(list_secret_versions).delete(clear_secret_history),
+        )
+        .route("/secrets/{id}/versions/{version}", get(get_secret_version))
+        .route(
+            "/secrets/{id}/versions/{version}/restore",
+            axum::routing::post(restore_secret_version),
+        )
 }
 
 async fn overview(
@@ -314,6 +324,7 @@ async fn update_secret(
         Permission::FULL
     };
     let mut secret = repository
+        .acting_as(AuditActor::User(mutation.0.user_id))
         .update_web(id, &input.key, &input.value, &input.note, input.project_id)
         .await?;
     secret.permissions = target;
@@ -355,6 +366,88 @@ async fn purge_secret(
     require_secret_write(&state, &mutation, id).await?;
     SecretRepository::new(state.db.clone()).purge(id).await?;
     record_user_event(&state, mutation.0.user_id, "secret.purge", "secret", id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_secret_versions(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    session: AuthenticatedSession,
+) -> Result<Json<Vec<SecretVersionSummary>>, AppError> {
+    let model = SecretRepository::new(state.db.clone()).get(id).await?;
+    AccessRepository::new(state.db.clone())
+        .user_secret(session.user_id, session.user.role, &model)
+        .await?
+        .require_read()?;
+    Ok(Json(
+        SecretHistoryRepository::new(state.db.clone())
+            .list(&model)
+            .await?,
+    ))
+}
+
+async fn get_secret_version(
+    State(state): State<AppState>,
+    Path((id, version)): Path<(Uuid, i64)>,
+    session: AuthenticatedSession,
+) -> Result<Json<SecretVersionDetail>, AppError> {
+    let model = SecretRepository::new(state.db.clone()).get(id).await?;
+    AccessRepository::new(state.db.clone())
+        .user_secret(session.user_id, session.user.role, &model)
+        .await?
+        .require_read()?;
+    let detail = SecretHistoryRepository::new(state.db.clone())
+        .get(id, version)
+        .await?;
+    record_user_event(&state, session.user_id, "secret.version.read", "secret", id).await?;
+    Ok(Json(detail))
+}
+
+async fn restore_secret_version(
+    State(state): State<AppState>,
+    Path((id, version)): Path<(Uuid, i64)>,
+    mutation: MutationSession,
+) -> Result<Json<WebSecret>, AppError> {
+    let repository = SecretRepository::new(state.db.clone());
+    let existing = repository.get(id).await?;
+    let permissions = AccessRepository::new(state.db.clone())
+        .user_secret(mutation.0.user_id, mutation.0.user.role, &existing)
+        .await?;
+    permissions.require_write()?;
+    let mut secret = repository
+        .acting_as(AuditActor::User(mutation.0.user_id))
+        .restore_version(id, version)
+        .await?;
+    secret.permissions = permissions;
+    record_user_event(
+        &state,
+        mutation.0.user_id,
+        "secret.version.restore",
+        "secret",
+        id,
+    )
+    .await?;
+    Ok(Json(secret))
+}
+
+async fn clear_secret_history(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    mutation: MutationSession,
+) -> Result<StatusCode, AppError> {
+    require_admin(&mutation.0.user)?;
+    SecretRepository::new(state.db.clone()).get(id).await?;
+    SecretHistoryRepository::new(state.db.clone())
+        .clear(id)
+        .await?;
+    record_user_event(
+        &state,
+        mutation.0.user_id,
+        "secret.history.clear",
+        "secret",
+        id,
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
