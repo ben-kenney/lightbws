@@ -97,6 +97,8 @@ pub struct SecondFactorChallenge {
 pub struct AuthConfig {
     pub initialized: bool,
     pub local_enabled: bool,
+    /// Whether this instance is configured for passkeys (`LIGHTBWS_PUBLIC_URL`).
+    pub passkeys_enabled: bool,
 }
 
 pub async fn config(State(state): State<AppState>) -> Result<Json<AuthConfig>, AppError> {
@@ -107,6 +109,7 @@ pub async fn config(State(state): State<AppState>) -> Result<Json<AuthConfig>, A
             .await?
             .is_some(),
         local_enabled: true,
+        passkeys_enabled: state.passkeys.is_some(),
     }))
 }
 
@@ -151,8 +154,10 @@ pub async fn login(
     clear_login_failures(&state, &rate_key).await;
     let user_id = Uuid::parse_str(&model.id).map_err(AppError::internal)?;
     let two_factor = state.two_factor();
-    let methods = two_factor.methods(user_id).await?;
-    if !methods.is_empty() {
+    if let Some(methods) = two_factor
+        .methods(user_id, state.passkeys.is_some())
+        .await?
+    {
         // The password is proven, but the session only exists after the second step.
         let challenge = two_factor
             .create_challenge(Some(user_id), SECOND_FACTOR_CHALLENGE, None)
@@ -503,7 +508,7 @@ pub(crate) fn digest(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
 }
 
-fn second_factor_rate_key(client: Option<IpAddr>) -> String {
+pub(crate) fn second_factor_rate_key(client: Option<IpAddr>) -> String {
     format!(
         "second-factor|{}",
         client.map_or_else(|| "unknown".into(), |client| client.to_string())

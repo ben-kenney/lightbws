@@ -76,6 +76,7 @@ async fn schema_contains_every_record_table_and_supporting_structure() {
             "secret_versions",
             "secrets",
             "sessions",
+            "user_passkeys",
             "user_recovery_codes",
             "user_totp",
             "users",
@@ -474,6 +475,51 @@ async fn every_table_enforces_its_storage_invariants() {
             "INSERT INTO login_challenges (id, user_id, kind, failed_attempts, created_at, expires_at) VALUES ('short', '{}', 'second_factor', 0, 10, 20)",
             user.id
         ),
+    )
+    .await;
+
+    let passkey = |id: Uuid, credential: &str, columns: &str, values: &str| {
+        format!(
+            "INSERT INTO user_passkeys (id, user_id, credential_id, public_key, name, created_at{columns}) VALUES ('{id}', '{}', '{credential}', 'key', 'Laptop', 10{values})",
+            user.id
+        )
+    };
+    db.connection()
+        .execute_unprepared(&passkey(Uuid::new_v4(), "credential-1", "", ""))
+        .await
+        .expect("valid passkey");
+    // One credential belongs to one account.
+    assert_rejected(&db, passkey(Uuid::new_v4(), "credential-1", "", "")).await;
+    assert_rejected(&db, passkey(Uuid::new_v4(), "", "", "")).await;
+    assert_rejected(
+        &db,
+        passkey(Uuid::new_v4(), "credential-2", ", sign_count", ", -1"),
+    )
+    .await;
+    assert_rejected(
+        &db,
+        passkey(
+            Uuid::new_v4(),
+            "credential-2",
+            ", sign_count",
+            ", 4294967296",
+        ),
+    )
+    .await;
+    assert_rejected(
+        &db,
+        passkey(Uuid::new_v4(), "credential-2", ", backup_state", ", 1"),
+    )
+    .await;
+    assert_rejected(
+        &db,
+        passkey(Uuid::new_v4(), "credential-2", ", last_used_at", ", 9"),
+    )
+    .await;
+    assert_rejected(&db, "UPDATE user_passkeys SET name = ''").await;
+    assert_rejected(
+        &db,
+        format!("UPDATE user_passkeys SET user_id = '{}'", Uuid::new_v4()),
     )
     .await;
 

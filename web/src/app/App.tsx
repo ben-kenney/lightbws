@@ -6,13 +6,14 @@ import { IconButton as BaseIconButton } from "@astryxdesign/core/IconButton"
 import { Skeleton } from "@astryxdesign/core/Skeleton"
 import { Tooltip } from "@astryxdesign/core/Tooltip"
 import { SpotlightTour, useSpotlight, type SpotlightStep } from "react-tourlight"
-import { ArchiveRestore, ArrowLeft, ArrowRight, BookOpen, Boxes, Check, ChevronRight, CircleGauge, Clock3, CloudUpload, Copy, DatabaseBackup, Eye, EyeOff, ExternalLink, FileDown, FileUp, FolderKanban, Globe2, History, Info, KeyRound, Languages, LogOut, Menu, Monitor, Moon, MoveHorizontal, Network, Pencil, Plus, RefreshCw, ScrollText, Search, ServerCog, Settings, ShieldCheck, Sun, Trash2, UserCog, UsersRound, X } from "lucide-react"
+import { ArchiveRestore, ArrowLeft, ArrowRight, BookOpen, Boxes, Check, ChevronRight, CircleGauge, Clock3, CloudUpload, Copy, DatabaseBackup, Eye, EyeOff, ExternalLink, FileDown, FileUp, FolderKanban, Globe2, History, Info, Fingerprint, KeyRound, Languages, LogOut, Menu, Monitor, Moon, MoveHorizontal, Network, Pencil, Plus, RefreshCw, ScrollText, Search, ServerCog, Settings, ShieldCheck, Sun, Trash2, UserCog, UsersRound, X } from "lucide-react"
 import qrcode from "qrcode-generator"
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ComponentProps, type FormEvent, type ReactNode } from "react"
 
 import { ApiError, api } from "./api"
 import { useScrollLock } from "./useScrollLock"
-import type { AccessPolicy, AuditEvent, AuditSettings, BackupCapabilities, BackupConfig, BackupEncryption, BackupJob, BackupScopes, BackupTarget, GrantInput, Group, IssuedMachineAccessToken, IssuedMachineAccount, Locale, MachineAccessToken, MachineAccount, NamedGrant, Overview, Project, Role, SecondFactorProof, Secret, SecretVersion, SecretVersionDetail, Session, ThemeMode, TotpEnrollment, TwoFactorStatus, User } from "./types"
+import { createPasskey, getPasskey, passkeyCancelled, passkeysSupported } from "./webauthn"
+import type { AccessPolicy, AuditEvent, AuditSettings, BackupCapabilities, BackupConfig, BackupEncryption, BackupJob, BackupScopes, BackupTarget, GrantInput, Group, IssuedMachineAccessToken, IssuedMachineAccount, Locale, MachineAccessToken, MachineAccount, NamedGrant, Overview, Passkey, Project, Role, SecondFactorProof, Secret, SecretVersion, SecretVersionDetail, Session, ThemeMode, TotpEnrollment, TwoFactorStatus, User } from "./types"
 import { useI18n } from "../i18n/I18nProvider"
 import type { MessageKey } from "../i18n/messages"
 import type { AstryxThemeName } from "../theme/astryxThemes"
@@ -104,13 +105,17 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (session: Session) =>
   const [password, setPassword] = useState("")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<MessageKey | null>(null)
-  const [challenge, setChallenge] = useState<{ token: string; startedAt: number; attempts: number } | null>(null)
-  const [recovery, setRecovery] = useState(false)
+  const [challenge, setChallenge] = useState<{ token: string; startedAt: number; attempts: number; methods: string[] } | null>(null)
+  const [step, setStep] = useState<"code" | "recovery" | "passkey">("code")
+  const recovery = step === "recovery"
   const [code, setCode] = useState("")
+  const passkeysAvailable = usePasskeysAvailable()
+  const passkeyOffered = passkeysAvailable && Boolean(challenge?.methods.includes("passkey"))
+  const codeOffered = Boolean(challenge?.methods.includes("totp"))
 
   function restart(message: MessageKey | null) {
     setChallenge(null)
-    setRecovery(false)
+    setStep("code")
     setCode("")
     setPassword("")
     setError(message)
@@ -123,8 +128,10 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (session: Session) =>
     setError(null)
     try {
       const result = await api.login(username, password)
-      if ("twoFactorRequired" in result) setChallenge({ token: result.challenge, startedAt: Date.now(), attempts: 0 })
-      else onAuthenticated(result)
+      if ("twoFactorRequired" in result) {
+        setChallenge({ token: result.challenge, startedAt: Date.now(), attempts: 0, methods: result.methods })
+        setStep(result.methods.includes("totp") ? "code" : passkeysAvailable && result.methods.includes("passkey") ? "passkey" : "recovery")
+      } else onAuthenticated(result)
     } catch (caught) {
       setError(caught instanceof ApiError && caught.status === 429 ? "tooManyAttempts" : "loginError")
     } finally {
@@ -149,6 +156,45 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (session: Session) =>
         setCode("")
         setError("twoFactorError")
       }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function failedSecondStep(caught: unknown, message: MessageKey) {
+    if (!challenge) return
+    if (caught instanceof ApiError && caught.status === 429) setError("tooManyAttempts")
+    else if (challenge.attempts + 1 >= CHALLENGE_ATTEMPTS) restart("twoFactorExpired")
+    else {
+      setChallenge({ ...challenge, attempts: challenge.attempts + 1 })
+      setError(message)
+    }
+  }
+
+  async function passkeySecondStep() {
+    if (!challenge || busy) return
+    if (Date.now() - challenge.startedAt >= CHALLENGE_LIFETIME_MS) return restart("twoFactorExpired")
+    setBusy(true)
+    setError(null)
+    try {
+      const credential = await getPasskey(await api.passkeyChallengeOptions(challenge.token))
+      onAuthenticated(await api.passkeyChallengeVerify(credential))
+    } catch (caught) {
+      if (!passkeyCancelled(caught)) failedSecondStep(caught, "passkeyError")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function passkeySignIn() {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      const credential = await getPasskey(await api.passkeySignInOptions())
+      onAuthenticated(await api.passkeySignInVerify(credential))
+    } catch (caught) {
+      if (!passkeyCancelled(caught)) setError(caught instanceof ApiError && caught.status === 429 ? "tooManyAttempts" : "passkeyError")
     } finally {
       setBusy(false)
     }
@@ -184,22 +230,27 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (session: Session) =>
             <form onSubmit={submitCode} className="form-stack">
               <div>
                 <h1>{t("twoFactorTitle")}</h1>
-                <p className="muted">{t(recovery ? "twoFactorRecoveryPrompt" : "twoFactorPrompt")}</p>
+                <p className="muted">{t(step === "passkey" ? "passkeyPrompt" : recovery ? "twoFactorRecoveryPrompt" : "twoFactorPrompt")}</p>
               </div>
-              <SecondFactorField key={recovery ? "recovery" : "code"} recovery={recovery} value={code} onChange={setCode} autoFocus />
+              {step !== "passkey" && <SecondFactorField key={step} recovery={recovery} value={code} onChange={setCode} autoFocus />}
               {error && <Banner status="error" title={t(error)} />}
-              <Button type="submit" variant="primary" size="lg" width="100%" label={busy ? t("signingIn") : t("verify")} isLoading={busy} isDisabled={!code.trim()} />
+              {step === "passkey" ? <Button variant="primary" size="lg" width="100%" icon={<Fingerprint />} label={busy ? t("signingIn") : t("usePasskey")} isLoading={busy} onClick={() => void passkeySecondStep()} /> : <Button type="submit" variant="primary" size="lg" width="100%" label={busy ? t("signingIn") : t("verify")} isLoading={busy} isDisabled={!code.trim()} />}
               <div className="login-alternatives">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  label={t(recovery ? "useAuthenticatorCode" : "useRecoveryCode")}
-                  onClick={() => {
-                    setRecovery(!recovery)
-                    setCode("")
-                    setError(null)
-                  }}
-                />
+                {(["passkey", "code", "recovery"] as const)
+                  .filter((option) => option !== step && (option === "recovery" || (option === "passkey" ? passkeyOffered : codeOffered)))
+                  .map((option) => (
+                    <Button
+                      key={option}
+                      variant="ghost"
+                      size="sm"
+                      label={t(option === "passkey" ? "usePasskeyInstead" : option === "code" ? "useAuthenticatorCode" : "useRecoveryCode")}
+                      onClick={() => {
+                        setStep(option)
+                        setCode("")
+                        setError(null)
+                      }}
+                    />
+                  ))}
                 <Button variant="ghost" size="sm" label={t("backToSignIn")} onClick={() => restart(null)} />
               </div>
             </form>
@@ -213,6 +264,7 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (session: Session) =>
               <Field label={t("password")} value={password} onChange={setPassword} type="password" autoComplete="current-password" required />
               {error && <Banner status="error" title={t(error)} />}
               <Button type="submit" variant="primary" size="lg" width="100%" label={busy ? t("signingIn") : t("signIn")} isLoading={busy} isDisabled={!username || !password} />
+              {passkeysAvailable && <Button variant="secondary" size="lg" width="100%" icon={<Fingerprint />} label={t("signInWithPasskey")} isDisabled={busy} onClick={() => void passkeySignIn()} />}
             </form>
           )}
         </Card>
@@ -221,8 +273,27 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (session: Session) =>
   )
 }
 
+/** Whether this instance and this browser can both do passkeys. */
+function usePasskeysAvailable() {
+  const [enabled, setEnabled] = useState(false)
+  useEffect(() => {
+    let current = true
+    if (passkeysSupported())
+      Promise.resolve()
+        .then(() => api.authConfig())
+        .then((config) => current && setEnabled(Boolean(config?.passkeysEnabled)))
+        .catch(() => undefined)
+    return () => {
+      current = false
+    }
+  }, [])
+  return enabled
+}
+
 function EnrollmentRequiredPage({ onEnrolled, onSignedOut }: { onEnrolled: () => Promise<void>; onSignedOut: () => void }) {
   const { t } = useI18n()
+  const passkeysAvailable = usePasskeysAvailable()
+  const [method, setMethod] = useState<"totp" | "passkey">("totp")
   async function logout() {
     await api.logout().catch(() => undefined)
     onSignedOut()
@@ -237,7 +308,12 @@ function EnrollmentRequiredPage({ onEnrolled, onSignedOut }: { onEnrolled: () =>
               <h1>{t("enrollmentRequiredTitle")}</h1>
               <p className="muted">{t("enrollmentRequiredText")}</p>
             </div>
-            <TotpSetupFlow onDone={() => void onEnrolled()} onCancel={() => void logout()} cancelLabel={t("logout")} />
+            {method === "passkey" ? <PasskeySetupFlow onDone={() => void onEnrolled()} onCancel={() => void logout()} cancelLabel={t("logout")} /> : <TotpSetupFlow onDone={() => void onEnrolled()} onCancel={() => void logout()} cancelLabel={t("logout")} />}
+            {passkeysAvailable && (
+              <div>
+                <Button variant="ghost" size="sm" label={t(method === "passkey" ? "useAuthenticatorAppInstead" : "usePasskeyInstead")} onClick={() => setMethod(method === "passkey" ? "totp" : "passkey")} />
+              </div>
+            )}
           </div>
         </Card>
       </section>
@@ -373,6 +449,153 @@ function TotpSetupFlow({ onDone, onCancel, cancelLabel }: { onDone: () => void; 
   )
 }
 
+function PasskeySetupFlow({ onDone, onCancel, cancelLabel }: { onDone: () => void; onCancel: () => void; cancelLabel?: string }) {
+  const { t } = useI18n()
+  const [password, setPassword] = useState("")
+  const [name, setName] = useState("")
+  const [codes, setCodes] = useState<string[] | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const nameError = textValidation(name, 128, "nameRequirement", t)
+
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    if (busy || !password || nameError) return
+    setBusy(true)
+    setError(null)
+    try {
+      const credential = await createPasskey(await api.passkeyRegisterOptions(password))
+      const registered = await api.passkeyRegisterVerify(name.trim(), credential)
+      if (registered.recoveryCodes?.length) setCodes(registered.recoveryCodes)
+      else onDone()
+    } catch (caught) {
+      if (caught instanceof DOMException && caught.name === "InvalidStateError") setError(t("passkeyAlreadyRegistered"))
+      else if (!passkeyCancelled(caught)) setError(caught instanceof ApiError ? apiErrorText(caught, t) : t("passkeySetupError"))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (codes) return <RecoveryCodesView codes={codes} onDone={onDone} />
+  return (
+    <form className="form-stack" onSubmit={submit} noValidate>
+      <p className="muted">{t("passkeySetupText")}</p>
+      {error && <Banner status="error" title={error} />}
+      <Field label={t("currentPassword")} value={password} onChange={setPassword} type="password" autoComplete="current-password" autoFocus required />
+      <Field label={t("passkeyName")} value={name} onChange={setName} placeholder={t("passkeyNamePlaceholder")} hint={t("nameRequirement")} required />
+      <div className="dialog-actions">
+        <Button variant="ghost" label={cancelLabel || t("cancel")} onClick={onCancel} isDisabled={busy} />
+        <Button type="submit" variant="primary" icon={<Fingerprint />} label={t("createPasskey")} isLoading={busy} isDisabled={!password || Boolean(nameError)} />
+      </div>
+    </form>
+  )
+}
+
+function PasskeysSection({ status, notify, onChanged }: { status: TwoFactorStatus; notify: (text: string, error?: boolean) => void; onChanged: () => void }) {
+  const { t } = useI18n()
+  const available = usePasskeysAvailable()
+  const [items, setItems] = useState<Passkey[]>([])
+  const [adding, setAdding] = useState(false)
+  const [renaming, setRenaming] = useState<Passkey | null>(null)
+  const [removing, setRemoving] = useState<Passkey | null>(null)
+  const load = useCallback(() => {
+    if (!available) return
+    api
+      .passkeys()
+      .then(setItems)
+      .catch(() => notify(t("genericError"), true))
+  }, [available, notify, t])
+  useEffect(load, [load])
+  function changed(message: MessageKey) {
+    setAdding(false)
+    setRenaming(null)
+    setRemoving(null)
+    notify(t(message))
+    load()
+    onChanged()
+  }
+  // The only second factor cannot be removed while policy requires one.
+  const locked = status.required && !status.totpEnabled && items.length <= 1
+  return (
+    <div className="security-row">
+      <div>
+        <strong>{t("passkeys")}</strong>
+        <p className="muted">{t(available ? "passkeysText" : "passkeysUnavailable")}</p>
+        {items.length > 0 && (
+          <ul className="passkey-list">
+            {items.map((item) => (
+              <li key={item.id}>
+                <Fingerprint aria-hidden="true" />
+                <div>
+                  <strong>{item.name}</strong>
+                  <small className="muted">
+                    {t(item.synced ? "passkeySynced" : "passkeyDeviceBound")} · {t("passkeyAdded")} {formatDate(item.createdAt)} · {t("lastUsed")} {item.lastUsedAt ? formatDate(item.lastUsedAt) : t("never")}
+                  </small>
+                </div>
+                <IconButton variant="ghost" label={`${t("rename")} · ${item.name}`} tooltip={t("rename")} icon={<Pencil />} onClick={() => setRenaming(item)} />
+                <IconButton variant="ghost" label={`${t("removePasskey")} · ${item.name}`} tooltip={locked ? t("twoFactorRequiredNote") : t("removePasskey")} icon={<Trash2 />} isDisabled={locked} onClick={() => setRemoving(item)} />
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      {available && <Button variant={items.length ? "ghost" : "primary"} icon={<Plus />} label={t("addPasskey")} onClick={() => setAdding(true)} />}
+      {adding && (
+        <Modal title={t("addPasskey")} onClose={() => setAdding(false)}>
+          <PasskeySetupFlow onDone={() => changed("passkeyAddedNotice")} onCancel={() => setAdding(false)} />
+        </Modal>
+      )}
+      {renaming && (
+        <NameDialog
+          title={t("rename")}
+          label={t("passkeyName")}
+          initialValue={renaming.name}
+          onClose={() => setRenaming(null)}
+          onSave={async (name) => {
+            await api.renamePasskey(renaming.id, name)
+            changed("changesSaved")
+          }}
+        />
+      )}
+      {removing && <RemovePasskeyDialog passkey={removing} onClose={() => setRemoving(null)} onDone={() => changed("passkeyRemovedNotice")} />}
+    </div>
+  )
+}
+
+function RemovePasskeyDialog({ passkey, onClose, onDone }: { passkey: Passkey; onClose: () => void; onDone: () => void }) {
+  const { t } = useI18n()
+  const [password, setPassword] = useState("")
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    if (busy || !password) return
+    setBusy(true)
+    setError(null)
+    try {
+      await api.removePasskey(passkey.id, password)
+      onDone()
+    } catch (caught) {
+      setError(apiErrorText(caught, t))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <Modal title={`${t("removePasskey")} · ${passkey.name}`} onClose={onClose}>
+      <form className="form-stack" onSubmit={submit} noValidate>
+        <Banner status="warning" title={t("removePasskeyText")} />
+        {error && <Banner status="error" title={error} />}
+        <Field label={t("currentPassword")} value={password} onChange={setPassword} type="password" autoComplete="current-password" autoFocus required />
+        <div className="dialog-actions">
+          <Button variant="ghost" label={t("cancel")} onClick={onClose} isDisabled={busy} />
+          <Button type="submit" variant="destructive" label={t("removePasskey")} isLoading={busy} isDisabled={!password} />
+        </div>
+      </form>
+    </Modal>
+  )
+}
+
 type SecurityAction = "setup" | "disable" | "regenerate" | "password"
 
 function SecurityPanel({ notify }: { notify: (text: string, error?: boolean) => void }) {
@@ -409,12 +632,19 @@ function SecurityPanel({ notify }: { notify: (text: string, error?: boolean) => 
               {t("twoFactor")} <span className="status-pill" data-status={status?.enabled ? "active" : "disabled"}><i />{t(status?.enabled ? "twoFactorOn" : "twoFactorOff")}</span>
             </strong>
             <p className="muted">{t(status?.enabled ? "twoFactorOnText" : "twoFactorOffText")}</p>
-            {status?.enabled && status.required && <p className="muted">{t("twoFactorRequiredNote")}</p>}
+            {status?.required && <p className="muted">{t("twoFactorRequiredNote")}</p>}
           </div>
-          {status && !status.totpEnabled && <Button variant="primary" icon={<ShieldCheck />} label={t("setUpAuthenticator")} onClick={() => setAction("setup")} />}
-          {status?.totpEnabled && !status.required && <Button variant="ghost" label={t("turnOffTwoFactor")} onClick={() => setAction("disable")} />}
         </div>
-        {status?.totpEnabled && (
+        <div className="security-row">
+          <div>
+            <strong>{t("authenticatorApp")}</strong>
+            <p className="muted">{t(status?.totpEnabled ? "authenticatorAppOnText" : "authenticatorAppOffText")}</p>
+          </div>
+          {status && !status.totpEnabled && <Button variant={status.enabled ? "ghost" : "primary"} icon={<ShieldCheck />} label={t("setUpAuthenticator")} onClick={() => setAction("setup")} />}
+          {status?.totpEnabled && (!status.required || status.passkeyCount > 0) && <Button variant="ghost" label={t("turnOffTwoFactor")} onClick={() => setAction("disable")} />}
+        </div>
+        {status && <PasskeysSection status={status} notify={notify} onChanged={() => void load()} />}
+        {status?.enabled && (
           <div className="security-row">
             <div>
               <strong>
@@ -439,8 +669,8 @@ function SecurityPanel({ notify }: { notify: (text: string, error?: boolean) => 
         </Modal>
       )}
       {action === "disable" && <DisableTwoFactorDialog onClose={() => setAction(null)} onDone={() => finished("twoFactorDisabled")} />}
-      {action === "regenerate" && <RegenerateRecoveryCodesDialog onClose={() => finished()} />}
-      {action === "password" && status && <ChangePasswordDialog needsCode={status.enabled} onClose={() => setAction(null)} onDone={() => finished("passwordChanged")} />}
+      {action === "regenerate" && status && <RegenerateRecoveryCodesDialog needsCode={status.totpEnabled} onClose={() => finished()} />}
+      {action === "password" && status && <ChangePasswordDialog needsCode={status.totpEnabled} onClose={() => setAction(null)} onDone={() => finished("passwordChanged")} />}
     </article>
   )
 }
@@ -507,7 +737,7 @@ function DisableTwoFactorDialog({ onClose, onDone }: { onClose: () => void; onDo
   )
 }
 
-function RegenerateRecoveryCodesDialog({ onClose }: { onClose: () => void }) {
+function RegenerateRecoveryCodesDialog({ needsCode, onClose }: { needsCode: boolean; onClose: () => void }) {
   const { t } = useI18n()
   const [password, setPassword] = useState("")
   const [code, setCode] = useState("")
@@ -516,11 +746,11 @@ function RegenerateRecoveryCodesDialog({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState<string | null>(null)
   async function submit(event: FormEvent) {
     event.preventDefault()
-    if (busy || !password || !code.trim()) return
+    if (busy || !password || (needsCode && !code.trim())) return
     setBusy(true)
     setError(null)
     try {
-      setCodes((await api.regenerateRecoveryCodes(password, code.trim())).recoveryCodes)
+      setCodes((await api.regenerateRecoveryCodes(password, needsCode ? code.trim() : undefined)).recoveryCodes)
     } catch (caught) {
       setCode("")
       setError(apiErrorText(caught, t))
@@ -537,10 +767,10 @@ function RegenerateRecoveryCodesDialog({ onClose }: { onClose: () => void }) {
           <p className="muted">{t("regenerateRecoveryCodesText")}</p>
           {error && <Banner status="error" title={error} />}
           <Field label={t("currentPassword")} value={password} onChange={setPassword} type="password" autoComplete="current-password" autoFocus required />
-          <SecondFactorField recovery={false} value={code} onChange={setCode} />
+          {needsCode && <SecondFactorField recovery={false} value={code} onChange={setCode} />}
           <div className="dialog-actions">
             <Button variant="ghost" label={t("cancel")} onClick={onClose} isDisabled={busy} />
-            <Button type="submit" variant="primary" label={t("regenerateRecoveryCodes")} isLoading={busy} isDisabled={!password || !code.trim()} />
+            <Button type="submit" variant="primary" label={t("regenerateRecoveryCodes")} isLoading={busy} isDisabled={!password || (needsCode && !code.trim())} />
           </div>
         </form>
       )}

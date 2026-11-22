@@ -3,6 +3,7 @@ pub mod audit;
 pub mod backups;
 pub mod groups;
 pub mod machines;
+pub mod passkeys;
 pub mod projects;
 pub mod secret_history;
 pub mod secrets;

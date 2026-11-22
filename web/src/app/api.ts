@@ -1,4 +1,5 @@
-import type { AccessPolicy, AccessPolicyInput, AuditEvent, AuditSettings, BackupCapabilities, BackupJob, BackupScopes, BackupTarget, Group, IssuedMachineAccessToken, IssuedMachineAccount, LoginResult, MachineAccess, MachineAccessInput, MachineAccessToken, MachineAccount, Overview, Project, RecoveryCodes, Role, SecondFactorProof, Secret, SecretVersion, SecretVersionDetail, Session, TotpEnrollment, TwoFactorStatus, User } from "./types"
+import type { PasskeyAssertion, PasskeyAttestation } from "./webauthn"
+import type { AccessPolicy, AccessPolicyInput, AuditEvent, AuthConfig, Passkey, PasskeyOptions, PasskeyRegistered, AuditSettings, BackupCapabilities, BackupJob, BackupScopes, BackupTarget, Group, IssuedMachineAccessToken, IssuedMachineAccount, LoginResult, MachineAccess, MachineAccessInput, MachineAccessToken, MachineAccount, Overview, Project, RecoveryCodes, Role, SecondFactorProof, Secret, SecretVersion, SecretVersionDetail, Session, TotpEnrollment, TwoFactorStatus, User } from "./types"
 
 export class ApiError extends Error {
   constructor(public status: number, public code: string, public detail?: string) {
@@ -41,7 +42,17 @@ export const api = {
   setupTotp: (password: string) => request<TotpEnrollment>("/auth/2fa/totp/setup", json("POST", { password })),
   confirmTotp: (code: string) => request<RecoveryCodes>("/auth/2fa/totp/confirm", json("POST", { code })),
   disableTotp: (password: string, proof: SecondFactorProof) => request<void>("/auth/2fa/totp", json("DELETE", { password, ...proof })),
-  regenerateRecoveryCodes: (password: string, code: string) => request<RecoveryCodes>("/auth/2fa/recovery-codes/regenerate", json("POST", { password, code })),
+  regenerateRecoveryCodes: (password: string, code?: string) => request<RecoveryCodes>("/auth/2fa/recovery-codes/regenerate", json("POST", code ? { password, code } : { password })),
+  authConfig: () => request<AuthConfig>("/auth/config"),
+  passkeys: () => request<Passkey[]>("/auth/passkeys"),
+  passkeyRegisterOptions: (password: string) => request<PasskeyOptions>("/auth/passkeys/register/options", json("POST", { password })),
+  passkeyRegisterVerify: (name: string, credential: PasskeyAttestation) => request<PasskeyRegistered>("/auth/passkeys/register/verify", json("POST", { name, credential })),
+  renamePasskey: (id: string, name: string) => request<Passkey>(`/auth/passkeys/${id}`, json("PUT", { name })),
+  removePasskey: (id: string, password: string) => request<void>(`/auth/passkeys/${id}`, json("DELETE", { password })),
+  passkeyChallengeOptions: (challenge: string) => request<PasskeyOptions>("/auth/login/passkey/options", json("POST", { challenge })),
+  async passkeyChallengeVerify(credential: PasskeyAssertion) { const value = await request<Session>("/auth/login/passkey/verify", json("POST", { credential })); csrfToken = value.csrfToken; return value },
+  passkeySignInOptions: () => request<PasskeyOptions>("/auth/passkey/options", { method: "POST" }),
+  async passkeySignInVerify(credential: PasskeyAssertion) { const value = await request<Session>("/auth/passkey/verify", json("POST", { credential })); csrfToken = value.csrfToken; return value },
   overview: () => request<Overview>("/overview"),
   projects: (trash = false) => request<Project[]>(`/projects?trash=${trash}`),
   createProject: (name: string) => request<Project>("/projects", json("POST", { name })),

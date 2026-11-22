@@ -36,8 +36,8 @@ const session: Session = {
   csrfToken: "csrf",
   user: { id: "user-1", username: "admin", displayName: "Administrator", role: "admin", disabled: false, createdAt: 1, updatedAt: 1, lastLoginAt: 1 },
 }
-const off: TwoFactorStatus = { enabled: false, totpEnabled: false, recoveryCodesRemaining: 0, required: false }
-const on: TwoFactorStatus = { enabled: true, totpEnabled: true, recoveryCodesRemaining: 10, required: false }
+const off: TwoFactorStatus = { enabled: false, totpEnabled: false, passkeyCount: 0, recoveryCodesRemaining: 0, required: false }
+const on: TwoFactorStatus = { enabled: true, totpEnabled: true, passkeyCount: 0, recoveryCodesRemaining: 10, required: false }
 const challenge = { twoFactorRequired: true, challenge: "challenge-token", methods: ["totp", "recovery_code"] }
 
 async function enterPassword() {
@@ -75,7 +75,7 @@ describe("two-factor authentication", () => {
     render(<Providers><App /></Providers>)
 
     await enterPassword()
-    expect(await screen.findByRole("heading", { level: 1, name: "Two-factor code" })).toBeInTheDocument()
+    expect(await screen.findByRole("heading", { level: 1, name: "Two-step verification" })).toBeInTheDocument()
     await userEvent.type(screen.getByLabelText(/^Authenticator code/), "000000")
     await userEvent.click(screen.getByRole("button", { name: "Verify" }))
     expect(await screen.findByText("That code is not correct.")).toBeInTheDocument()

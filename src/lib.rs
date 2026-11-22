@@ -11,6 +11,7 @@ pub mod sdk_crypto;
 pub mod sdk_models;
 pub mod totp;
 pub mod web;
+pub mod webauthn;
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -50,6 +51,8 @@ pub struct AppState {
     pub(crate) ip_header: Option<HeaderName>,
     pub require_2fa: TwoFactorPolicy,
     pub(crate) second_factor_failures: RateLimiter,
+    /// The site passkeys are bound to. `None` turns passkeys off.
+    pub passkeys: Option<webauthn::RelyingParty>,
 }
 
 impl AppState {
@@ -68,6 +71,7 @@ impl AppState {
                 std::time::Duration::from_secs(60),
                 4096,
             ),
+            passkeys: config.public_url.clone(),
         }
     }
 

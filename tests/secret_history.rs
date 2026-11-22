@@ -85,6 +85,7 @@ impl Fixture {
             secret_history_limit: limit,
             require_2fa: Default::default(),
             reset_2fa_for: None,
+            public_url: None,
             allow_plaintext_backups: false,
         };
         Self {
