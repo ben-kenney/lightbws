@@ -6,11 +6,13 @@ import { IconButton as BaseIconButton } from "@astryxdesign/core/IconButton"
 import { Skeleton } from "@astryxdesign/core/Skeleton"
 import { Tooltip } from "@astryxdesign/core/Tooltip"
 import { SpotlightTour, useSpotlight, type SpotlightStep } from "react-tourlight"
-import { ArchiveRestore, BookOpen, Boxes, Check, ChevronRight, CircleGauge, Clock3, CloudUpload, Copy, DatabaseBackup, Eye, EyeOff, ExternalLink, FileDown, FileUp, FolderKanban, Globe2, History, Info, KeyRound, Languages, LogOut, Menu, Monitor, Moon, MoveHorizontal, Network, Pencil, Plus, RefreshCw, ScrollText, Search, ServerCog, Settings, ShieldCheck, Sun, Trash2, UserCog, UsersRound, X } from "lucide-react"
+import { ArchiveRestore, ArrowLeft, ArrowRight, BookOpen, Boxes, Check, ChevronRight, CircleGauge, Clock3, CloudUpload, Copy, DatabaseBackup, Eye, EyeOff, ExternalLink, FileDown, FileUp, FolderKanban, Globe2, History, Info, KeyRound, Languages, LogOut, Menu, Monitor, Moon, MoveHorizontal, Network, Pencil, Plus, RefreshCw, ScrollText, Search, ServerCog, Settings, ShieldCheck, Sun, Trash2, UserCog, UsersRound, X } from "lucide-react"
+import qrcode from "qrcode-generator"
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ComponentProps, type FormEvent, type ReactNode } from "react"
 
 import { ApiError, api } from "./api"
-import type { AccessPolicy, AuditEvent, AuditSettings, BackupCapabilities, BackupConfig, BackupEncryption, BackupJob, BackupScopes, BackupTarget, GrantInput, Group, IssuedMachineAccessToken, IssuedMachineAccount, Locale, MachineAccessToken, MachineAccount, NamedGrant, Overview, Project, Role, Secret, SecretVersion, SecretVersionDetail, Session, ThemeMode, User } from "./types"
+import { useScrollLock } from "./useScrollLock"
+import type { AccessPolicy, AuditEvent, AuditSettings, BackupCapabilities, BackupConfig, BackupEncryption, BackupJob, BackupScopes, BackupTarget, GrantInput, Group, IssuedMachineAccessToken, IssuedMachineAccount, Locale, MachineAccessToken, MachineAccount, NamedGrant, Overview, Project, Role, SecondFactorProof, Secret, SecretVersion, SecretVersionDetail, Session, ThemeMode, TotpEnrollment, TwoFactorStatus, User } from "./types"
 import { useI18n } from "../i18n/I18nProvider"
 import type { MessageKey } from "../i18n/messages"
 import type { AstryxThemeName } from "../theme/astryxThemes"
@@ -19,6 +21,10 @@ import { useTheme } from "../theme/ThemeProvider"
 
 type Page = "dashboard" | "projects" | "secrets" | "machines" | "users" | "groups" | "audit" | "trash" | "integrations" | "help" | "backups" | "transfer" | "settings"
 type Notice = { text: string; error?: boolean } | null
+type CreationKind = "secret" | "project" | "machine" | "user" | "group"
+type CreationRequest = { kind: CreationKind | "choose"; project?: Project }
+type CreateResource = (kind: CreationKind, project?: Project) => void
+type CreationPageProps = { notify: (text: string, error?: boolean) => void; onCreate: CreateResource; refreshKey: number }
 const adminPages = new Set<Page>(["machines", "users", "groups", "audit", "backups", "transfer"])
 type AccessResource = {
   kind: "project" | "secret" | "machine"
@@ -71,6 +77,7 @@ export function App() {
 
   if (loading) return <LoadingScreen />
   if (!session) return <LoginPage onAuthenticated={authenticated} />
+  if (session.twoFactorEnrollmentRequired) return <EnrollmentRequiredPage onEnrolled={() => api.session().then(setSession)} onSignedOut={signedOut} />
   return <Workspace session={session} onSignedOut={signedOut} />
 }
 
@@ -87,23 +94,61 @@ function LoadingScreen() {
   )
 }
 
+const CHALLENGE_LIFETIME_MS = 5 * 60 * 1000
+const CHALLENGE_ATTEMPTS = 5
+
 function LoginPage({ onAuthenticated }: { onAuthenticated: (session: Session) => void }) {
   const { locale, setLocale, t } = useI18n()
   const { resolved, setMode } = useTheme()
   const [username, setUsername] = useState("")
   const [password, setPassword] = useState("")
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState(false)
+  const [error, setError] = useState<MessageKey | null>(null)
+  const [challenge, setChallenge] = useState<{ token: string; startedAt: number; attempts: number } | null>(null)
+  const [recovery, setRecovery] = useState(false)
+  const [code, setCode] = useState("")
+
+  function restart(message: MessageKey | null) {
+    setChallenge(null)
+    setRecovery(false)
+    setCode("")
+    setPassword("")
+    setError(message)
+  }
 
   async function submit(event: FormEvent) {
     event.preventDefault()
     if (!username || !password || busy) return
     setBusy(true)
-    setError(false)
+    setError(null)
     try {
-      onAuthenticated(await api.login(username, password))
-    } catch {
-      setError(true)
+      const result = await api.login(username, password)
+      if ("twoFactorRequired" in result) setChallenge({ token: result.challenge, startedAt: Date.now(), attempts: 0 })
+      else onAuthenticated(result)
+    } catch (caught) {
+      setError(caught instanceof ApiError && caught.status === 429 ? "tooManyAttempts" : "loginError")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function submitCode(event: FormEvent) {
+    event.preventDefault()
+    const value = code.trim()
+    if (!challenge || !value || busy) return
+    if (Date.now() - challenge.startedAt >= CHALLENGE_LIFETIME_MS) return restart("twoFactorExpired")
+    setBusy(true)
+    setError(null)
+    try {
+      onAuthenticated(await api.loginSecondFactor(challenge.token, recovery ? { recoveryCode: value } : { code: value }))
+    } catch (caught) {
+      if (caught instanceof ApiError && caught.status === 429) setError("tooManyAttempts")
+      else if (challenge.attempts + 1 >= CHALLENGE_ATTEMPTS) restart("twoFactorExpired")
+      else {
+        setChallenge({ ...challenge, attempts: challenge.attempts + 1 })
+        setCode("")
+        setError("twoFactorError")
+      }
     } finally {
       setBusy(false)
     }
@@ -135,36 +180,440 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (session: Session) =>
           </div>
         </div>
         <Card width="100%" maxWidth={440} padding={8} className="login-card">
-          <form onSubmit={submit} className="form-stack">
-            <div>
-              <h1>{t("loginTitle")}</h1>
-              <p className="muted">{t("loginDescription")}</p>
-            </div>
-            <Field label={t("username")} value={username} onChange={setUsername} autoComplete="username" autoFocus required />
-            <Field label={t("password")} value={password} onChange={setPassword} type="password" autoComplete="current-password" required />
-            {error && <Banner status="error" title={t("loginError")} />}
-            <Button type="submit" variant="primary" size="lg" width="100%" label={busy ? t("signingIn") : t("signIn")} isLoading={busy} isDisabled={!username || !password} />
-          </form>
+          {challenge ? (
+            <form onSubmit={submitCode} className="form-stack">
+              <div>
+                <h1>{t("twoFactorTitle")}</h1>
+                <p className="muted">{t(recovery ? "twoFactorRecoveryPrompt" : "twoFactorPrompt")}</p>
+              </div>
+              <SecondFactorField key={recovery ? "recovery" : "code"} recovery={recovery} value={code} onChange={setCode} autoFocus />
+              {error && <Banner status="error" title={t(error)} />}
+              <Button type="submit" variant="primary" size="lg" width="100%" label={busy ? t("signingIn") : t("verify")} isLoading={busy} isDisabled={!code.trim()} />
+              <div className="login-alternatives">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  label={t(recovery ? "useAuthenticatorCode" : "useRecoveryCode")}
+                  onClick={() => {
+                    setRecovery(!recovery)
+                    setCode("")
+                    setError(null)
+                  }}
+                />
+                <Button variant="ghost" size="sm" label={t("backToSignIn")} onClick={() => restart(null)} />
+              </div>
+            </form>
+          ) : (
+            <form onSubmit={submit} className="form-stack">
+              <div>
+                <h1>{t("loginTitle")}</h1>
+                <p className="muted">{t("loginDescription")}</p>
+              </div>
+              <Field label={t("username")} value={username} onChange={setUsername} autoComplete="username" autoFocus required />
+              <Field label={t("password")} value={password} onChange={setPassword} type="password" autoComplete="current-password" required />
+              {error && <Banner status="error" title={t(error)} />}
+              <Button type="submit" variant="primary" size="lg" width="100%" label={busy ? t("signingIn") : t("signIn")} isLoading={busy} isDisabled={!username || !password} />
+            </form>
+          )}
         </Card>
       </section>
     </main>
   )
 }
 
+function EnrollmentRequiredPage({ onEnrolled, onSignedOut }: { onEnrolled: () => Promise<void>; onSignedOut: () => void }) {
+  const { t } = useI18n()
+  async function logout() {
+    await api.logout().catch(() => undefined)
+    onSignedOut()
+  }
+  return (
+    <main className="login-page">
+      <section className="enrollment-page">
+        <Brand />
+        <Card width="100%" maxWidth={480} padding={8} className="login-card">
+          <div className="form-stack">
+            <div>
+              <h1>{t("enrollmentRequiredTitle")}</h1>
+              <p className="muted">{t("enrollmentRequiredText")}</p>
+            </div>
+            <TotpSetupFlow onDone={() => void onEnrolled()} onCancel={() => void logout()} cancelLabel={t("logout")} />
+          </div>
+        </Card>
+      </section>
+    </main>
+  )
+}
+
+function SecondFactorField({ recovery, value, onChange, autoFocus }: { recovery: boolean; value: string; onChange: (value: string) => void; autoFocus?: boolean }) {
+  const { t } = useI18n()
+  return recovery ? <Field label={t("recoveryCode")} value={value} onChange={onChange} autoComplete="off" autoFocus={autoFocus} required /> : <Field label={t("authenticatorCode")} value={value} onChange={onChange} autoComplete="one-time-code" inputMode="numeric" autoFocus={autoFocus} required />
+}
+
+function QrCode({ value, label }: { value: string; label: string }) {
+  const { size, path } = useMemo(() => {
+    const code = qrcode(0, "M")
+    code.addData(value)
+    code.make()
+    const count = code.getModuleCount()
+    let cells = ""
+    for (let row = 0; row < count; row += 1) for (let column = 0; column < count; column += 1) if (code.isDark(row, column)) cells += `M${column} ${row}h1v1h-1z`
+    return { size: count, path: cells }
+  }, [value])
+  return (
+    <svg className="qr-code" role="img" aria-label={label} viewBox={`-4 -4 ${size + 8} ${size + 8}`} shapeRendering="crispEdges">
+      <rect x={-4} y={-4} width={size + 8} height={size + 8} fill="#fff" />
+      <path d={path} fill="#000" />
+    </svg>
+  )
+}
+
+function RecoveryCodesView({ codes, onDone }: { codes: string[]; onDone: () => void }) {
+  const { t } = useI18n()
+  const [copied, setCopied] = useState(false)
+  const text = `${codes.join("\n")}\n`
+  async function copy() {
+    await navigator.clipboard.writeText(text)
+    setCopied(true)
+  }
+  function download() {
+    const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }))
+    const link = document.createElement("a")
+    link.href = url
+    link.download = "lightbws-recovery-codes.txt"
+    link.click()
+    URL.revokeObjectURL(url)
+  }
+  return (
+    <div className="form-stack">
+      <Banner status="warning" title={t("recoveryCodesText")} />
+      <ul className="recovery-codes" aria-label={t("recoveryCodes")}>
+        {codes.map((code) => (
+          <li key={code}>
+            <code>{code}</code>
+          </li>
+        ))}
+      </ul>
+      <div className="dialog-actions">
+        <Button variant="ghost" icon={<Copy />} label={copied ? t("copied") : t("copy")} onClick={() => void copy()} />
+        <Button variant="ghost" icon={<FileDown />} label={t("download")} onClick={download} />
+        <Button variant="primary" label={t("recoveryCodesSaved")} onClick={onDone} />
+      </div>
+    </div>
+  )
+}
+
+function TotpSetupFlow({ onDone, onCancel, cancelLabel }: { onDone: () => void; onCancel: () => void; cancelLabel?: string }) {
+  const { t } = useI18n()
+  const [password, setPassword] = useState("")
+  const [enrollment, setEnrollment] = useState<TotpEnrollment | null>(null)
+  const [code, setCode] = useState("")
+  const [codes, setCodes] = useState<string[] | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function run(action: () => Promise<void>) {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      await action()
+    } catch (caught) {
+      setError(apiErrorText(caught, t))
+    } finally {
+      setBusy(false)
+    }
+  }
+  function begin(event: FormEvent) {
+    event.preventDefault()
+    if (password) void run(async () => setEnrollment(await api.setupTotp(password)))
+  }
+  function confirm(event: FormEvent) {
+    event.preventDefault()
+    if (code.trim())
+      void run(async () => {
+        try {
+          setCodes((await api.confirmTotp(code.trim())).recoveryCodes)
+        } finally {
+          setCode("")
+        }
+      })
+  }
+
+  if (codes) return <RecoveryCodesView codes={codes} onDone={onDone} />
+  if (enrollment)
+    return (
+      <form className="form-stack" onSubmit={confirm} noValidate>
+        <p className="muted">{t("scanQrCode")}</p>
+        <QrCode value={enrollment.uri} label={t("qrCodeLabel")} />
+        <div>
+          <small className="muted">{t("setupKey")}</small>
+          <div className="token-box">
+            <code>{enrollment.secret}</code>
+          </div>
+        </div>
+        {error && <Banner status="error" title={error} />}
+        <SecondFactorField recovery={false} value={code} onChange={setCode} autoFocus />
+        <div className="dialog-actions">
+          <Button variant="ghost" label={cancelLabel || t("cancel")} onClick={onCancel} isDisabled={busy} />
+          <Button type="submit" variant="primary" label={t("verify")} isLoading={busy} isDisabled={!code.trim()} />
+        </div>
+      </form>
+    )
+  return (
+    <form className="form-stack" onSubmit={begin} noValidate>
+      <p className="muted">{t("confirmPasswordToContinue")}</p>
+      {error && <Banner status="error" title={error} />}
+      <Field label={t("currentPassword")} value={password} onChange={setPassword} type="password" autoComplete="current-password" autoFocus required />
+      <div className="dialog-actions">
+        <Button variant="ghost" label={cancelLabel || t("cancel")} onClick={onCancel} isDisabled={busy} />
+        <Button type="submit" variant="primary" label={t("continue")} isLoading={busy} isDisabled={!password} />
+      </div>
+    </form>
+  )
+}
+
+type SecurityAction = "setup" | "disable" | "regenerate" | "password"
+
+function SecurityPanel({ notify }: { notify: (text: string, error?: boolean) => void }) {
+  const { t } = useI18n()
+  const [status, setStatus] = useState<TwoFactorStatus | null>(null)
+  const [action, setAction] = useState<SecurityAction | null>(null)
+  const load = useCallback(
+    () =>
+      api
+        .twoFactorStatus()
+        .then(setStatus)
+        .catch(() => notify(t("genericError"), true)),
+    [notify, t],
+  )
+  useEffect(() => {
+    void load()
+  }, [load])
+  function finished(message?: MessageKey) {
+    setAction(null)
+    if (message) notify(t(message))
+    void load()
+  }
+  return (
+    <article className="panel settings-panel">
+      <div>
+        <p className="eyebrow">2FA</p>
+        <h2>{t("security")}</h2>
+        <p>{t("securityText")}</p>
+      </div>
+      <div className="security-stack">
+        <div className="security-row">
+          <div>
+            <strong>
+              {t("twoFactor")} <span className="status-pill" data-status={status?.enabled ? "active" : "disabled"}><i />{t(status?.enabled ? "twoFactorOn" : "twoFactorOff")}</span>
+            </strong>
+            <p className="muted">{t(status?.enabled ? "twoFactorOnText" : "twoFactorOffText")}</p>
+            {status?.enabled && status.required && <p className="muted">{t("twoFactorRequiredNote")}</p>}
+          </div>
+          {status && !status.totpEnabled && <Button variant="primary" icon={<ShieldCheck />} label={t("setUpAuthenticator")} onClick={() => setAction("setup")} />}
+          {status?.totpEnabled && !status.required && <Button variant="ghost" label={t("turnOffTwoFactor")} onClick={() => setAction("disable")} />}
+        </div>
+        {status?.totpEnabled && (
+          <div className="security-row">
+            <div>
+              <strong>
+                {t("recoveryCodesRemaining")}: {status.recoveryCodesRemaining}
+              </strong>
+              <p className="muted">{t("regenerateRecoveryCodesText")}</p>
+            </div>
+            <Button variant="ghost" icon={<RefreshCw />} label={t("regenerateRecoveryCodes")} onClick={() => setAction("regenerate")} />
+          </div>
+        )}
+        <div className="security-row">
+          <div>
+            <strong>{t("password")}</strong>
+            <p className="muted">{t("changePasswordText")}</p>
+          </div>
+          <Button variant="ghost" icon={<KeyRound />} label={t("changePassword")} onClick={() => setAction("password")} />
+        </div>
+      </div>
+      {action === "setup" && (
+        <Modal title={t("setUpAuthenticator")} onClose={() => finished()}>
+          <TotpSetupFlow onDone={() => finished("twoFactorEnabled")} onCancel={() => finished()} />
+        </Modal>
+      )}
+      {action === "disable" && <DisableTwoFactorDialog onClose={() => setAction(null)} onDone={() => finished("twoFactorDisabled")} />}
+      {action === "regenerate" && <RegenerateRecoveryCodesDialog onClose={() => finished()} />}
+      {action === "password" && status && <ChangePasswordDialog needsCode={status.enabled} onClose={() => setAction(null)} onDone={() => finished("passwordChanged")} />}
+    </article>
+  )
+}
+
+function SecondFactorChoice({ value, onChange, recovery, onRecovery }: { value: string; onChange: (value: string) => void; recovery: boolean; onRecovery: (value: boolean) => void }) {
+  const { t } = useI18n()
+  return (
+    <div className="form-stack">
+      <SecondFactorField key={recovery ? "recovery" : "code"} recovery={recovery} value={value} onChange={onChange} />
+      <div>
+        <Button
+          variant="ghost"
+          size="sm"
+          label={t(recovery ? "useAuthenticatorCode" : "useRecoveryCode")}
+          onClick={() => {
+            onRecovery(!recovery)
+            onChange("")
+          }}
+        />
+      </div>
+    </div>
+  )
+}
+
+function proofOf(value: string, recovery: boolean): SecondFactorProof {
+  return recovery ? { recoveryCode: value.trim() } : { code: value.trim() }
+}
+
+function DisableTwoFactorDialog({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+  const { t } = useI18n()
+  const [password, setPassword] = useState("")
+  const [code, setCode] = useState("")
+  const [recovery, setRecovery] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    if (busy || !password || !code.trim()) return
+    setBusy(true)
+    setError(null)
+    try {
+      await api.disableTotp(password, proofOf(code, recovery))
+      onDone()
+    } catch (caught) {
+      setCode("")
+      setError(apiErrorText(caught, t))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <Modal title={`${t("turnOffTwoFactor")} · ${t("twoFactor")}`} onClose={onClose}>
+      <form className="form-stack" onSubmit={submit} noValidate>
+        <Banner status="warning" title={t("turnOffTwoFactorText")} />
+        {error && <Banner status="error" title={error} />}
+        <Field label={t("currentPassword")} value={password} onChange={setPassword} type="password" autoComplete="current-password" autoFocus required />
+        <SecondFactorChoice value={code} onChange={setCode} recovery={recovery} onRecovery={setRecovery} />
+        <div className="dialog-actions">
+          <Button variant="ghost" label={t("cancel")} onClick={onClose} isDisabled={busy} />
+          <Button type="submit" variant="destructive" label={t("turnOffTwoFactor")} isLoading={busy} isDisabled={!password || !code.trim()} />
+        </div>
+      </form>
+    </Modal>
+  )
+}
+
+function RegenerateRecoveryCodesDialog({ onClose }: { onClose: () => void }) {
+  const { t } = useI18n()
+  const [password, setPassword] = useState("")
+  const [code, setCode] = useState("")
+  const [codes, setCodes] = useState<string[] | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    if (busy || !password || !code.trim()) return
+    setBusy(true)
+    setError(null)
+    try {
+      setCodes((await api.regenerateRecoveryCodes(password, code.trim())).recoveryCodes)
+    } catch (caught) {
+      setCode("")
+      setError(apiErrorText(caught, t))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <Modal title={t("regenerateRecoveryCodes")} onClose={onClose}>
+      {codes ? (
+        <RecoveryCodesView codes={codes} onDone={onClose} />
+      ) : (
+        <form className="form-stack" onSubmit={submit} noValidate>
+          <p className="muted">{t("regenerateRecoveryCodesText")}</p>
+          {error && <Banner status="error" title={error} />}
+          <Field label={t("currentPassword")} value={password} onChange={setPassword} type="password" autoComplete="current-password" autoFocus required />
+          <SecondFactorField recovery={false} value={code} onChange={setCode} />
+          <div className="dialog-actions">
+            <Button variant="ghost" label={t("cancel")} onClick={onClose} isDisabled={busy} />
+            <Button type="submit" variant="primary" label={t("regenerateRecoveryCodes")} isLoading={busy} isDisabled={!password || !code.trim()} />
+          </div>
+        </form>
+      )}
+    </Modal>
+  )
+}
+
+function ChangePasswordDialog({ needsCode, onClose, onDone }: { needsCode: boolean; onClose: () => void; onDone: () => void }) {
+  const { t } = useI18n()
+  const [current, setCurrent] = useState("")
+  const [next, setNext] = useState("")
+  const [code, setCode] = useState("")
+  const [recovery, setRecovery] = useState(false)
+  const [touched, setTouched] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const nextError = passwordValidation(next, t)
+  const incomplete = !current || Boolean(nextError) || (needsCode && !code.trim())
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    setTouched(true)
+    if (busy || incomplete) return
+    setBusy(true)
+    setError(null)
+    try {
+      await api.changePassword({ currentPassword: current, newPassword: next, ...(needsCode ? proofOf(code, recovery) : {}) })
+      onDone()
+    } catch (caught) {
+      setCode("")
+      setError(apiErrorText(caught, t))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <Modal title={t("changePassword")} onClose={onClose}>
+      <form className="form-stack" onSubmit={submit} noValidate>
+        {error && <Banner status="error" title={error} />}
+        <Field label={t("currentPassword")} value={current} onChange={setCurrent} type="password" autoComplete="current-password" autoFocus required />
+        <Field label={t("newPassword")} value={next} onChange={setNext} onBlur={() => setTouched(true)} type="password" autoComplete="new-password" required hint={t("passwordRequirement")} error={touched ? nextError : undefined} />
+        {needsCode && <SecondFactorChoice value={code} onChange={setCode} recovery={recovery} onRecovery={setRecovery} />}
+        <DialogActions onClose={onClose} busy={busy} disabled={incomplete} />
+      </form>
+    </Modal>
+  )
+}
+
 function Workspace({ session, onSignedOut }: { session: Session; onSignedOut: () => void }) {
   const { t } = useI18n()
   const isAdmin = session.user.role === "admin"
-  const [page, setPage] = useState<Page>(() => availablePage(location.hash.slice(1), isAdmin))
+  const [page, setPage] = useState<Page>(() => availablePage(location.hash.slice(1).split("?")[0], isAdmin))
   const [mobileOpen, setMobileOpen] = useState(false)
+  const [projectScope, setProjectScope] = useState(() => new URLSearchParams(location.hash.split("?")[1]).get("project") || "")
+  const [creation, setCreation] = useState<CreationRequest | null>(null)
+  const [revision, setRevision] = useState(0)
   const [notice, setNotice] = useState<Notice>(null)
   const mobileMenuButton = useRef<HTMLButtonElement>(null)
+  const navigation = useRef<HTMLElement>(null)
+  const navigationWasOpen = useRef(false)
+  const navigationCloseTarget = useRef<"trigger" | "content">("trigger")
+  const creationTrigger = useRef<HTMLElement | null>(null)
   const notify = useCallback((text: string, error = false) => setNotice({ text, error }), [])
+  useScrollLock(mobileOpen)
 
   useEffect(() => {
     const change = () => {
-      const next = availablePage(location.hash.slice(1), isAdmin)
-      if (location.hash.slice(1) !== next) history.replaceState(null, "", `#${next}`)
+      const route = location.hash.slice(1)
+      const next = availablePage(route.split("?")[0], isAdmin)
+      if (route.split("?")[0] !== next) history.replaceState(null, "", `#${next}`)
       setPage(next)
+      setProjectScope(next === "secrets" ? new URLSearchParams(location.hash.split("?")[1]).get("project") || "" : "")
+      navigationCloseTarget.current = "content"
+      setMobileOpen(false)
     }
     change()
     addEventListener("hashchange", change)
@@ -175,46 +624,129 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut: ()
     const timer = setTimeout(() => setNotice(null), 5000)
     return () => clearTimeout(timer)
   }, [notice])
-  const navigate = useCallback((next: Page) => {
-    location.hash = next
+  const navigate = useCallback((next: Page, projectId?: string) => {
+    location.hash = projectId ? `${next}?project=${encodeURIComponent(projectId)}` : next
     setPage(next)
+    setProjectScope(projectId || "")
+    navigationCloseTarget.current = "content"
     setMobileOpen(false)
   }, [])
   const closeMobileNavigation = useCallback(() => {
+    navigationCloseTarget.current = "trigger"
     setMobileOpen(false)
-    mobileMenuButton.current?.focus()
+  }, [])
+  useEffect(() => {
+    if (mobileOpen) {
+      navigationWasOpen.current = true
+      return
+    }
+    if (!navigationWasOpen.current) return
+    navigationWasOpen.current = false
+    if (creation) return
+    if (navigationCloseTarget.current === "content" || matchMedia("(min-width: 60rem)").matches) document.getElementById("workspace-content")?.focus()
+    else mobileMenuButton.current?.focus()
+  }, [mobileOpen, creation])
+  useEffect(() => {
+    if (!mobileOpen) return
+    navigation.current?.querySelector<HTMLButtonElement>(".mobile-only")?.focus()
+    const keyboard = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || !navigation.current) return
+      if (event.key === "Escape") {
+        event.preventDefault()
+        closeMobileNavigation()
+      }
+      if (event.key !== "Tab") return
+      const elements = focusableElements(navigation.current)
+      const first = elements[0]
+      const last = elements[elements.length - 1]
+      if (!navigation.current.contains(document.activeElement)) {
+        event.preventDefault()
+        const target = event.shiftKey ? last : first
+        target?.focus()
+      } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last?.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first?.focus()
+      }
+    }
+    const desktop = matchMedia("(min-width: 60rem)")
+    const resize = () => {
+      if (!desktop.matches) return
+      navigationCloseTarget.current = "content"
+      setMobileOpen(false)
+    }
+    desktop.addEventListener("change", resize)
+    addEventListener("keydown", keyboard)
+    return () => {
+      desktop.removeEventListener("change", resize)
+      removeEventListener("keydown", keyboard)
+    }
+  }, [mobileOpen, closeMobileNavigation])
+  useEffect(() => {
+    const pointer = () => { document.documentElement.dataset.input = "pointer" }
+    const keyboard = () => { document.documentElement.dataset.input = "keyboard" }
+    addEventListener("pointerdown", pointer, { passive: true })
+    addEventListener("keydown", keyboard)
+    return () => {
+      removeEventListener("pointerdown", pointer)
+      removeEventListener("keydown", keyboard)
+      delete document.documentElement.dataset.input
+    }
+  }, [])
+  const startCreation = useCallback((kind: CreationKind | "choose", project?: Project) => {
+    creationTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    setMobileOpen(false)
+    setCreation({ kind, project })
+  }, [])
+  const closeCreation = useCallback(() => {
+    setCreation(null)
+    requestAnimationFrame(() => {
+      const trigger = creationTrigger.current
+      const desktop = matchMedia("(min-width: 60rem)").matches
+      const hiddenTrigger = trigger?.closest(desktop ? ".mobile-bar, .mobile-only" : ".sidebar")
+      if (trigger?.isConnected && !hiddenTrigger) {
+        trigger.focus()
+        if (document.activeElement === trigger) return
+      }
+      if (desktop) document.getElementById("workspace-content")?.focus()
+      else mobileMenuButton.current?.focus()
+    })
   }, [])
   async function logout() {
     await api.logout().catch(() => undefined)
     onSignedOut()
   }
-  const pageProps = { notify }
+  const pageProps = { notify, refreshKey: revision }
 
   return (
     <div className="workspace">
+      <a className="skip-link" href="#workspace-content" inert={mobileOpen || creation !== null} onClick={(event) => { event.preventDefault(); document.getElementById("workspace-content")?.focus() }}>{t("skipToContent")}</a>
       <WorkspaceTour onNavigate={navigate} />
-      <aside id="workspace-navigation" className="sidebar" data-open={mobileOpen}>
+      <aside ref={navigation} id="workspace-navigation" className="sidebar" data-open={mobileOpen} role={mobileOpen ? "dialog" : undefined} aria-modal={mobileOpen || undefined} aria-label={t("menu")} inert={creation !== null}>
         <div className="sidebar-head">
           <Brand />
           <IconButton className="mobile-only" variant="ghost" label={t("mobileClose")} icon={<X />} onClick={closeMobileNavigation} />
         </div>
         <nav aria-label={t("menu")}>
+          <Button className="workspace-create" variant="primary" icon={<Plus />} label={t("createResource")} onClick={() => startCreation("choose")} />
           <NavSectionLabel label={t("navWorkspace")} />
           <NavItem page="dashboard" current={page} icon={<CircleGauge />} label={t("dashboard")} onClick={navigate} />
-          <NavItem page="projects" current={page} icon={<FolderKanban />} label={t("projects")} onClick={navigate} />
           <NavItem page="secrets" current={page} icon={<KeyRound />} label={t("secrets")} onClick={navigate} />
-          <NavItem page="trash" current={page} icon={<Trash2 />} label={t("trash")} onClick={navigate} />
+          <NavItem page="projects" current={page} icon={<FolderKanban />} label={t("projects")} onClick={navigate} />
           {isAdmin && <NavSectionLabel label={t("navAccess")} />}
           {isAdmin && <NavItem page="machines" current={page} icon={<ServerCog />} label={t("machines")} onClick={navigate} />}
           {isAdmin && <NavItem page="users" current={page} icon={<UsersRound />} label={t("users")} onClick={navigate} />}
           {isAdmin && <NavItem page="groups" current={page} icon={<Boxes />} label={t("groups")} onClick={navigate} />}
+          <NavSectionLabel label={t("navOperations")} />
+          <NavItem page="trash" current={page} icon={<Trash2 />} label={t("trash")} onClick={navigate} />
           {isAdmin && <NavItem page="audit" current={page} icon={<ShieldCheck />} label={t("auditLog")} onClick={navigate} />}
+          {isAdmin && <NavItem page="backups" current={page} icon={<DatabaseBackup />} label={t("backups")} onClick={navigate} />}
+          {isAdmin && <NavItem page="transfer" current={page} icon={<ArchiveRestore />} label={t("transfer")} onClick={navigate} />}
           <NavSectionLabel label={t("navSupport")} />
           <NavItem page="integrations" current={page} icon={<Network />} label={t("integrations")} onClick={navigate} />
           <NavItem page="help" current={page} icon={<BookOpen />} label={t("help")} onClick={navigate} />
-          <NavSectionLabel label={t("navOperations")} />
-          {isAdmin && <NavItem page="backups" current={page} icon={<DatabaseBackup />} label={t("backups")} onClick={navigate} />}
-          {isAdmin && <NavItem page="transfer" current={page} icon={<ArchiveRestore />} label={t("transfer")} onClick={navigate} />}
           <NavItem page="settings" current={page} icon={<Settings />} label={t("settings")} onClick={navigate} />
         </nav>
         <div className="sidebar-account">
@@ -228,26 +760,30 @@ function Workspace({ session, onSignedOut }: { session: Session; onSignedOut: ()
           <IconButton variant="ghost" label={t("logout")} tooltip={t("logout")} icon={<LogOut />} onClick={() => void logout()} />
         </div>
       </aside>
-      {mobileOpen && <button className="sidebar-scrim" aria-label={t("mobileClose")} onClick={closeMobileNavigation} />}
-      <main className="main-canvas">
+      <button className="sidebar-scrim" data-open={mobileOpen} aria-label={t("mobileClose")} aria-hidden={!mobileOpen} tabIndex={-1} onClick={closeMobileNavigation} />
+      <main id="workspace-content" className="main-canvas" tabIndex={-1} inert={mobileOpen || creation !== null}>
         <div className="mobile-bar">
           <IconButton ref={mobileMenuButton} variant="ghost" label={t("menu")} icon={<Menu />} aria-controls="workspace-navigation" aria-expanded={mobileOpen} onClick={() => setMobileOpen(true)} />
-          <Brand compact />
+          <span className="mobile-location">{t(page === "machines" ? "machines" : page === "audit" ? "auditLog" : page)}</span>
+          <IconButton variant="ghost" label={t("createResource")} icon={<Plus />} onClick={() => startCreation("choose")} />
         </div>
-        {page === "dashboard" && <DashboardPage onNavigate={navigate} {...pageProps} />}
-        {page === "projects" && <ProjectsPage isAdmin={isAdmin} {...pageProps} />}
-        {page === "secrets" && <SecretsPage isAdmin={isAdmin} {...pageProps} />}
-        {page === "machines" && isAdmin && <MachinesPage {...pageProps} />}
-        {page === "users" && isAdmin && <UsersPage currentUser={session.user} {...pageProps} />}
-        {page === "groups" && isAdmin && <GroupsPage onNavigate={navigate} {...pageProps} />}
+        <div>
+        {page === "dashboard" && <DashboardPage onNavigate={navigate} onCreate={startCreation} {...pageProps} />}
+        {page === "projects" && <ProjectsPage isAdmin={isAdmin} onCreate={startCreation} onOpenProject={(project) => navigate("secrets", project.id)} {...pageProps} />}
+        {page === "secrets" && <SecretsPage isAdmin={isAdmin} projectScope={projectScope} onScopeChange={(projectId) => navigate("secrets", projectId)} onCreate={startCreation} {...pageProps} />}
+        {page === "machines" && isAdmin && <MachinesPage onCreate={startCreation} {...pageProps} />}
+        {page === "users" && isAdmin && <UsersPage currentUser={session.user} onCreate={startCreation} {...pageProps} />}
+        {page === "groups" && isAdmin && <GroupsPage onCreate={startCreation} {...pageProps} />}
         {page === "audit" && isAdmin && <AuditPage {...pageProps} />}
         {page === "trash" && <TrashPage isAdmin={isAdmin} {...pageProps} />}
         {page === "integrations" && <IntegrationsPage {...pageProps} />}
         {page === "help" && <HelpPage {...pageProps} />}
         {page === "backups" && isAdmin && <BackupsPage {...pageProps} />}
         {page === "transfer" && isAdmin && <TransferPage {...pageProps} />}
-        {page === "settings" && <SettingsPage />}
+        {page === "settings" && <SettingsPage {...pageProps} />}
+        </div>
       </main>
+      {creation && <CreationFlow request={creation} currentUser={session.user} onClose={closeCreation} onCreated={() => setRevision((value) => value + 1)} notify={notify} />}
       {notice && (
         <div className="toast" data-error={notice.error || undefined} role={notice.error ? "alert" : "status"}>
           {notice.error ? <X /> : <Check />}
@@ -408,7 +944,7 @@ function PageSkeleton({ variant = "table" }: { variant?: PageSkeletonVariant }) 
   )
 }
 
-function DashboardPage({ notify, onNavigate }: { notify: (text: string, error?: boolean) => void; onNavigate: (page: Page) => void }) {
+function DashboardPage({ notify, onNavigate, onCreate, refreshKey }: CreationPageProps & { onNavigate: (page: Page) => void }) {
   const { t } = useI18n()
   const { start } = useSpotlight()
   const [overview, setOverview] = useState<Overview | null>(null)
@@ -420,7 +956,7 @@ function DashboardPage({ notify, onNavigate }: { notify: (text: string, error?: 
       .then(setOverview)
       .catch(() => notify(t("genericError"), true))
       .finally(() => setLoading(false))
-  }, [notify, t])
+  }, [notify, t, refreshKey])
   const needsOnboarding = overview?.secrets === 0
   useEffect(() => {
     if (!needsOnboarding || started.current) return
@@ -452,7 +988,7 @@ function DashboardPage({ notify, onNavigate }: { notify: (text: string, error?: 
                 </div>
               </div>
               <div className="getting-started-actions">
-                <Button variant="primary" icon={<KeyRound />} label={t("createFirstSecret")} onClick={() => onNavigate("secrets")} />
+                <Button variant="primary" icon={<KeyRound />} label={t("createFirstSecret")} onClick={() => onCreate("secret")} />
                 <Button variant="ghost" label={t("startTour")} onClick={() => start("workspace-onboarding")} />
               </div>
               <ServiceEndpoint notify={notify} id="tour-service-endpoint" />
@@ -587,12 +1123,92 @@ function DashboardPath({ index, icon, title, description, onClick }: { index: st
   )
 }
 
-function ProjectsPage({ isAdmin, notify }: { isAdmin: boolean; notify: (text: string, error?: boolean) => void }) {
+function CreationFlow({ request, currentUser, onClose, onCreated, notify }: { request: CreationRequest; currentUser: User; onClose: () => void; onCreated: () => void; notify: (text: string, error?: boolean) => void }) {
+  const { t } = useI18n()
+  const isAdmin = currentUser.role === "admin"
+  const [kind, setKind] = useState(request.kind)
+  const [project, setProject] = useState(request.project)
+  const [projects, setProjects] = useState<Project[] | null>(null)
+  const [loadError, setLoadError] = useState(false)
+  const [completed, setCompleted] = useState<{ kind: CreationKind; id: string; name: string } | null>(null)
+  const [issued, setIssued] = useState<IssuedMachineAccount | null>(null)
+  const [access, setAccess] = useState<AccessResource | null>(null)
+  const [group, setGroup] = useState<Group | null>(null)
+  const [members, setMembers] = useState<User[] | null>(null)
+  const choiceId = useId()
+
+  useEffect(() => {
+    if (kind !== "secret") return
+    let active = true
+    setLoadError(false)
+    api.projects().then((items) => { if (active) setProjects(items) }).catch(() => { if (active) setLoadError(true) })
+    return () => { active = false }
+  }, [kind])
+
+  function created(resource: { kind: CreationKind; id: string; name: string }) {
+    setCompleted(resource)
+    onCreated()
+    notify(t("changesSaved"))
+  }
+
+  if (access && isAdmin) return <ResourceAccessDialog resource={access} onClose={() => setAccess(null)} notify={notify} />
+  if (group && members) return <GroupMembersDialog group={group} users={members} onClose={() => setMembers(null)} onSave={async (memberIds) => { setGroup(await api.replaceGroupMembers(group.id, memberIds)); setMembers(null); onCreated(); notify(t("changesSaved")) }} />
+  if (issued && isAdmin) return <TokenDialog item={issued} onClose={onClose} onConfigureAccess={() => setAccess({ kind: "machine", id: issued.id, name: issued.name })} notify={notify} />
+
+  if (completed) {
+    return (
+      <Modal title={t("creationComplete")} onClose={onClose}>
+        <div className="creation-success">
+          <span className="completion-icon"><Check aria-hidden="true" /></span>
+          <h3>{completed.name}</h3>
+          <p>{t("creationNextStep")}</p>
+        </div>
+        <div className="creation-next-actions">
+          {completed.kind === "project" && <Button icon={<KeyRound />} label={t("addProjectSecret")} onClick={() => { setCompleted(null); setKind("secret"); setProjects(null) }} />}
+          {isAdmin && (completed.kind === "project" || completed.kind === "secret") && <Button icon={<ShieldCheck />} label={t("manageAccess")} onClick={() => setAccess({ kind: completed.kind as "project" | "secret", id: completed.id, name: completed.name })} />}
+          {group && <Button icon={<UsersRound />} label={t("manageMembers")} onClick={() => { void api.users().then(setMembers).catch(() => notify(t("genericError"), true)) }} />}
+        </div>
+        <div className="dialog-actions"><Button variant="primary" label={t("done")} onClick={onClose} /></div>
+      </Modal>
+    )
+  }
+
+  if (kind === "secret") {
+    if (loadError) return <Modal title={t("newSecret")} onClose={onClose}><Banner status="error" title={t("genericError")} /><div className="dialog-actions"><Button label={t("close")} onClick={onClose} /></div></Modal>
+    if (!projects) return <Modal title={t("newSecret")} onClose={onClose}><PageSkeleton variant="cards" /></Modal>
+    if (!isAdmin && !projects.some((item) => item.permissions.write)) return <Modal title={t("newSecret")} onClose={onClose}><Banner status="info" title={t("noWritableProject")} /></Modal>
+    return <SecretDialog item={null} projects={project && !projects.some((item) => item.id === project.id) ? [...projects, project] : projects} initialProjectId={project?.id} allowUnassigned={isAdmin} onProjectCreated={onCreated} onClose={onClose} onSave={async (input) => { const secret = await api.createSecret(input); created({ kind: "secret", id: secret.id, name: secret.key }) }} />
+  }
+  if (kind === "project" && isAdmin) return <ProjectDialog item={null} onClose={onClose} onSave={async (name) => { const result = await api.createProject(name); setProject(result); created({ kind: "project", id: result.id, name: result.name }) }} />
+  if (kind === "machine" && isAdmin) return <NameDialog title={t("newMachineAccount")} label={t("machineName")} onClose={onClose} onSave={async (name) => { setIssued(await api.createMachine(name)); onCreated(); notify(t("changesSaved")) }} />
+  if (kind === "user" && isAdmin) return <UserDialog item={null} currentUser={currentUser} onClose={onClose} onSave={async (input) => { const user = await api.createUser({ username: input.username, displayName: input.displayName, role: input.role, password: input.password }); created({ kind: "user", id: user.id, name: user.displayName }) }} />
+  if (kind === "group" && isAdmin) return <NameDialog title={t("newGroup")} label={t("groupName")} onClose={onClose} onSave={async (name) => { const result = await api.createGroup(name); setGroup(result); created({ kind: "group", id: result.id, name: result.name }) }} />
+
+  const choices: Array<{ kind: CreationKind; icon: ReactNode; title: MessageKey; description: MessageKey }> = [
+    { kind: "secret", icon: <KeyRound />, title: "newSecret", description: "createSecretDescription" },
+    ...(isAdmin ? [
+      { kind: "project" as const, icon: <FolderKanban />, title: "newProject" as const, description: "createProjectDescription" as const },
+      { kind: "machine" as const, icon: <ServerCog />, title: "newMachineAccount" as const, description: "createMachineDescription" as const },
+      { kind: "user" as const, icon: <UsersRound />, title: "newUser" as const, description: "createUserDescription" as const },
+      { kind: "group" as const, icon: <Boxes />, title: "newGroup" as const, description: "createGroupDescription" as const },
+    ] : []),
+  ]
+  return (
+    <Modal title={t("createResource")} onClose={onClose} wide>
+      <p className="creation-intro">{t("creationIntro")}</p>
+      <div className="creation-grid">
+        {choices.map((choice) => <button key={choice.kind} className="creation-choice" aria-labelledby={`${choiceId}-${choice.kind}`} aria-describedby={`${choiceId}-${choice.kind}-hint`} onClick={() => setKind(choice.kind)}><span className="creation-choice-icon" aria-hidden="true">{choice.icon}</span><span><strong id={`${choiceId}-${choice.kind}`}>{t(choice.title)}</strong><small id={`${choiceId}-${choice.kind}-hint`}>{t(choice.description)}</small></span><ArrowRight aria-hidden="true" /></button>)}
+      </div>
+    </Modal>
+  )
+}
+
+function ProjectsPage({ isAdmin, notify, onCreate, onOpenProject, refreshKey }: CreationPageProps & { isAdmin: boolean; onOpenProject: (project: Project) => void }) {
   const { t } = useI18n()
   const [items, setItems] = useState<Project[]>([])
   const [query, setQuery] = useState("")
   const [loading, setLoading] = useState(true)
-  const [editing, setEditing] = useState<Project | "new" | null>(null)
+  const [editing, setEditing] = useState<Project | null>(null)
   const [accessItem, setAccessItem] = useState<Project | null>(null)
   const load = useCallback(
     () =>
@@ -605,10 +1221,10 @@ function ProjectsPage({ isAdmin, notify }: { isAdmin: boolean; notify: (text: st
   )
   useEffect(() => {
     void load()
-  }, [load])
+  }, [load, refreshKey])
   const filtered = items.filter((item) => item.name.toLowerCase().includes(query.toLowerCase()))
   async function save(name: string) {
-    editing === "new" ? await api.createProject(name) : editing && (await api.updateProject(editing.id, name))
+    if (editing) await api.updateProject(editing.id, name)
     setEditing(null)
     notify(t("changesSaved"))
     await load()
@@ -624,13 +1240,13 @@ function ProjectsPage({ isAdmin, notify }: { isAdmin: boolean; notify: (text: st
   }
   return (
     <div className="page">
-      <PageHeader title={t("projects")} action={isAdmin ? <Button variant="primary" icon={<Plus />} label={t("newProject")} onClick={() => setEditing("new")} /> : undefined} />
+      <PageHeader title={t("projects")} description={t("projectsIntro")} action={isAdmin ? <Button variant="primary" icon={<Plus />} label={t("newProject")} onClick={() => onCreate("project")} /> : undefined} />
       {loading ? (
         <PageSkeleton />
       ) : (
         <>
           <ListToolbar query={query} onQuery={setQuery} resultCount={filtered.length} totalCount={items.length} />
-          <DataPanel empty={!filtered.length} emptyTitle={query ? t("noResultsTitle") : undefined} emptyDescription={query ? t("noResultsDescription") : undefined} onEmptyAction={isAdmin && !query ? () => setEditing("new") : undefined}>
+          <DataPanel empty={!filtered.length} emptyTitle={query ? t("noResultsTitle") : undefined} emptyDescription={query ? t("noResultsDescription") : undefined} emptyActionLabel={t("newProject")} onEmptyAction={isAdmin && !query ? () => onCreate("project") : undefined}>
             <table>
               <thead>
                 <tr>
@@ -649,7 +1265,8 @@ function ProjectsPage({ isAdmin, notify }: { isAdmin: boolean; notify: (text: st
                           <FolderKanban />
                         </span>
                         <div>
-                          <strong>{item.name}</strong>
+                          <button className="resource-link" onClick={() => onOpenProject(item)}>{item.name}<ChevronRight aria-hidden="true" /></button>
+                          <small>{t("viewProjectSecrets")}</small>
                         </div>
                       </div>
                     </td>
@@ -659,6 +1276,7 @@ function ProjectsPage({ isAdmin, notify }: { isAdmin: boolean; notify: (text: st
                     <td>{formatDate(item.updatedAt)}</td>
                     <td>
                       <RowActions>
+                        {item.permissions.write && <IconButton variant="ghost" label={t("addProjectSecret")} icon={<Plus />} onClick={() => onCreate("secret", item)} />}
                         {isAdmin && <IconButton variant="ghost" label={t("manageAccess")} icon={<ShieldCheck />} onClick={() => setAccessItem(item)} />}
                         {isAdmin && <IconButton variant="ghost" label={t("edit")} icon={<Pencil />} onClick={() => setEditing(item)} />}
                         {isAdmin && <IconButton variant="ghost" label={t("delete")} icon={<Trash2 />} onClick={() => void remove(item)} />}
@@ -671,7 +1289,7 @@ function ProjectsPage({ isAdmin, notify }: { isAdmin: boolean; notify: (text: st
           </DataPanel>
         </>
       )}
-      {isAdmin && editing && <ProjectDialog item={editing === "new" ? null : editing} onClose={() => setEditing(null)} onSave={save} />}
+      {isAdmin && editing && <ProjectDialog item={editing} onClose={() => setEditing(null)} onSave={save} />}
       {isAdmin && accessItem && (
         <ResourceAccessDialog
           resource={{
@@ -710,7 +1328,7 @@ function ProjectDialog({ item, onClose, onSave }: { item: Project | null; onClos
     }
   }
   return (
-    <Modal title={t(item ? "editProject" : "newProject")} onClose={onClose}>
+    <Modal title={t(item ? "editProject" : "newProject")} onClose={onClose} busy={busy}>
       <form className="form-stack" onSubmit={submit} noValidate>
         {!item && <Banner status="info" title={t("newProjectHint")} />}
         {formError && <Banner status="error" title={formError} />}
@@ -721,13 +1339,13 @@ function ProjectDialog({ item, onClose, onSave }: { item: Project | null; onClos
   )
 }
 
-function SecretsPage({ isAdmin, notify }: { isAdmin: boolean; notify: (text: string, error?: boolean) => void }) {
+function SecretsPage({ isAdmin, notify, projectScope, onScopeChange, onCreate, refreshKey }: CreationPageProps & { isAdmin: boolean; projectScope: string; onScopeChange: (projectId?: string) => void }) {
   const { t } = useI18n()
   const [items, setItems] = useState<Secret[]>([])
   const [projects, setProjects] = useState<Project[]>([])
   const [loading, setLoading] = useState(true)
   const [query, setQuery] = useState("")
-  const [editing, setEditing] = useState<Secret | "new" | null>(null)
+  const [editing, setEditing] = useState<Secret | null>(null)
   const [accessItem, setAccessItem] = useState<Secret | null>(null)
   const [historyItem, setHistoryItem] = useState<Secret | null>(null)
   const [revealed, setRevealed] = useState<Set<string>>(new Set())
@@ -744,11 +1362,14 @@ function SecretsPage({ isAdmin, notify }: { isAdmin: boolean; notify: (text: str
   )
   useEffect(() => {
     void load()
-  }, [load])
-  const filtered = items.filter((item) => `${item.key} ${item.note}`.toLowerCase().includes(query.toLowerCase()))
+  }, [load, refreshKey])
+  const scopedItems = projectScope ? items.filter((item) => item.projectId === projectScope) : items
+  const filtered = scopedItems.filter((item) => `${item.key} ${item.note}`.toLowerCase().includes(query.trim().toLowerCase()))
+  const scopedProject = projects.find((item) => item.id === projectScope)
   const canCreate = isAdmin || projects.some((project) => project.permissions.write)
+  const canCreateHere = scopedProject ? scopedProject.permissions.write : canCreate && !projectScope
   async function save(input: { key: string; value: string; note: string; projectId: string | null }) {
-    editing === "new" ? await api.createSecret(input) : editing && (await api.updateSecret(editing.id, input))
+    if (editing) await api.updateSecret(editing.id, input)
     setEditing(null)
     notify(t("changesSaved"))
     await load()
@@ -769,12 +1390,12 @@ function SecretsPage({ isAdmin, notify }: { isAdmin: boolean; notify: (text: str
   return (
     <div className="page">
       <PageHeader
-        title={t("secrets")}
+        title={scopedProject?.name || t("secrets")}
         description={t("secretsIntro")}
         action={
-          canCreate ? (
+          canCreateHere ? (
             <span id="tour-new-secret">
-              <Button variant="primary" icon={<Plus />} label={t("newSecret")} onClick={() => setEditing("new")} />
+              <Button variant="primary" icon={<Plus />} label={t("newSecret")} onClick={() => onCreate("secret", scopedProject)} />
             </span>
           ) : undefined
         }
@@ -783,8 +1404,12 @@ function SecretsPage({ isAdmin, notify }: { isAdmin: boolean; notify: (text: str
         <PageSkeleton />
       ) : (
         <>
-          <ListToolbar query={query} onQuery={setQuery} resultCount={filtered.length} totalCount={items.length} />
-          <DataPanel empty={!filtered.length} emptyIcon={<KeyRound />} emptyTitle={query ? t("noResultsTitle") : t("emptySecretsTitle")} emptyDescription={query ? t("noResultsDescription") : t("emptySecretsText")} emptyActionLabel={t("createFirstSecret")} onEmptyAction={canCreate && !query ? () => setEditing("new") : undefined}>
+          <div className="resource-toolbar">
+            <ListToolbar query={query} onQuery={setQuery} resultCount={filtered.length} totalCount={scopedItems.length} />
+            <SelectField label={t("project")} value={projectScope} onChange={onScopeChange} options={[{ value: "", label: t("allProjects") }, ...(projectScope && !scopedProject ? [{ value: projectScope, label: t("unavailableProject") }] : []), ...projects.map((item) => ({ value: item.id, label: item.name }))]} />
+          </div>
+          {projectScope && <div className="project-context"><Button variant="ghost" icon={<ArrowLeft />} label={t("allSecrets")} onClick={() => onScopeChange()} /><span><FolderKanban aria-hidden="true" />{scopedProject?.name || t("unavailableProject")}</span></div>}
+          <DataPanel empty={!filtered.length} emptyIcon={<KeyRound />} emptyTitle={query ? t("noResultsTitle") : projectScope ? t("emptyProjectSecrets") : t("emptySecretsTitle")} emptyDescription={query ? t("noResultsDescription") : projectScope ? t("emptyProjectSecretsText") : t("emptySecretsText")} emptyActionLabel={t("createFirstSecret")} onEmptyAction={canCreateHere && !query ? () => onCreate("secret", scopedProject) : undefined}>
             <table>
               <thead>
                 <tr>
@@ -853,7 +1478,7 @@ function SecretsPage({ isAdmin, notify }: { isAdmin: boolean; notify: (text: str
           </DataPanel>
         </>
       )}
-      {editing && <SecretDialog item={editing === "new" ? null : editing} projects={projects} allowUnassigned={isAdmin || (editing !== "new" && editing.projectId === null)} onClose={() => setEditing(null)} onSave={save} />}
+      {editing && <SecretDialog item={editing} projects={projects} allowUnassigned={isAdmin || editing.projectId === null} allowProjectCreation={isAdmin} onClose={() => setEditing(null)} onSave={save} />}
       {isAdmin && accessItem && <ResourceAccessDialog resource={{ kind: "secret", id: accessItem.id, name: accessItem.key }} onClose={() => setAccessItem(null)} notify={notify} />}
       {historyItem && <SecretHistoryDialog secret={historyItem} isAdmin={isAdmin} onClose={() => setHistoryItem(null)} onChanged={() => void load()} notify={notify} />}
     </div>
@@ -1006,21 +1631,39 @@ function SecretHistoryDialog({ secret, isAdmin, onClose, onChanged, notify }: { 
   )
 }
 
-function SecretDialog({ item, projects, allowUnassigned, onClose, onSave }: { item: Secret | null; projects: Project[]; allowUnassigned: boolean; onClose: () => void; onSave: (input: { key: string; value: string; note: string; projectId: string | null }) => Promise<void> }) {
+function SecretDialog({ item, projects, allowUnassigned, allowProjectCreation = allowUnassigned, initialProjectId, onProjectCreated, onClose, onSave }: { item: Secret | null; projects: Project[]; allowUnassigned: boolean; allowProjectCreation?: boolean; initialProjectId?: string; onProjectCreated?: () => void; onClose: () => void; onSave: (input: { key: string; value: string; note: string; projectId: string | null }) => Promise<void> }) {
   const { t } = useI18n()
-  const allowedProjects = projects.filter((project) => project.permissions.write || project.id === item?.projectId)
+  const [addedProjects, setAddedProjects] = useState<Project[]>([])
+  const allowedProjects = [...projects, ...addedProjects.filter((added) => !projects.some((existing) => existing.id === added.id))].filter((project) => project.permissions.write || project.id === item?.projectId)
   const [key, setKey] = useState(item?.key || "")
   const [value, setValue] = useState(item?.value || "")
   const [note, setNote] = useState(item?.note || "")
-  const [projectId, setProjectId] = useState(item?.projectId || (allowUnassigned ? "" : allowedProjects[0]?.id || ""))
+  const [projectId, setProjectId] = useState(item?.projectId || initialProjectId || (allowUnassigned ? "" : allowedProjects[0]?.id || ""))
+  const [addingProject, setAddingProject] = useState(false)
+  const [projectName, setProjectName] = useState("")
+  const [projectBusy, setProjectBusy] = useState(false)
+  const [projectCreateError, setProjectCreateError] = useState<string | null>(null)
+  const projectPicker = useRef<HTMLDivElement>(null)
+  const inlineProject = useRef<HTMLDivElement>(null)
+  const inlineWasOpen = useRef(false)
+  const projectFocusReturn = useRef<"select" | "button">("button")
   const [busy, setBusy] = useState(false)
   const [touched, setTouched] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
   const keyError = textValidation(key, 500, "secretKeyRequirement", t)
   const projectError = !projectId && !allowUnassigned ? t("requiredField") : undefined
+  useEffect(() => {
+    if (addingProject) {
+      if (!inlineWasOpen.current) inlineProject.current?.querySelector("input")?.focus()
+      inlineWasOpen.current = true
+    } else if (inlineWasOpen.current && !projectBusy) {
+      inlineWasOpen.current = false
+      projectPicker.current?.querySelector<HTMLElement>(projectFocusReturn.current)?.focus()
+    }
+  }, [addingProject, projectBusy])
   async function submit(event: FormEvent) {
     event.preventDefault()
-    if (busy) return
+    if (busy || projectBusy || addingProject) return
     setTouched(true)
     if (keyError || projectError) return
     setBusy(true)
@@ -1047,8 +1690,26 @@ function SecretDialog({ item, projects, allowUnassigned, onClose, onSave }: { it
   ]
   const selectedProject = allowedProjects.find((project) => project.id === projectId)
   const storageHint = selectedProject ? t("projectSecretHint") : t("unassignedSecretHint")
+  async function createInlineProject() {
+    if (projectBusy || busy || textValidation(projectName, 500, "projectNameRequirement", t)) return
+    setProjectBusy(true)
+    setProjectCreateError(null)
+    try {
+      const created = await api.createProject(projectName.trim())
+      setAddedProjects((existing) => [...existing, created])
+      setProjectId(created.id)
+      projectFocusReturn.current = "select"
+      setAddingProject(false)
+      setProjectName("")
+      onProjectCreated?.()
+    } catch (caught) {
+      setProjectCreateError(apiErrorText(caught, t))
+    } finally {
+      setProjectBusy(false)
+    }
+  }
   return (
-    <Modal title={t(item ? "editSecret" : "newSecret")} onClose={onClose} wide>
+    <Modal title={t(item ? "editSecret" : "newSecret")} onClose={onClose} busy={busy || projectBusy} wide>
       <form className="form-stack" onSubmit={submit} noValidate>
         {formError && <Banner status="error" title={formError} />}
         <div className="form-grid">
@@ -1056,23 +1717,29 @@ function SecretDialog({ item, projects, allowUnassigned, onClose, onSave }: { it
           <Field label={t("secretValue")} value={value} onChange={setValue} />
         </div>
         <TextArea label={t("note")} value={note} onChange={setNote} />
-        <SelectField label={t("project")} value={projectId} onChange={setProjectId} options={projectOptions} />
+        <div ref={projectPicker} className="project-picker">
+          <SelectField label={t("project")} value={projectId} onChange={setProjectId} options={projectOptions} disabled={projectBusy || busy} />
+          {allowProjectCreation && !addingProject && <Button type="button" variant="ghost" icon={<Plus />} label={t("newProject")} isDisabled={busy} onClick={() => setAddingProject(true)} />}
+        </div>
+        {addingProject && <div ref={inlineProject} className="inline-project">
+          <p>{t("inlineProjectHint")}</p>
+          <Field label={t("projectName")} value={projectName} onChange={setProjectName} disabled={projectBusy} required hint={t("projectNameRequirement")} error={projectCreateError || undefined} />
+          <div className="inline-project-actions"><Button type="button" variant="ghost" label={t("cancel")} isDisabled={projectBusy} onClick={() => { projectFocusReturn.current = "button"; setAddingProject(false); setProjectCreateError(null) }} /><Button type="button" icon={<Plus />} label={t("createProjectAndSelect")} isLoading={projectBusy} isDisabled={Boolean(textValidation(projectName, 500, "projectNameRequirement", t))} onClick={() => void createInlineProject()} /></div>
+        </div>}
         <p className="field-hint" data-error={Boolean(touched && projectError) || undefined}>
           {touched && projectError ? projectError : storageHint}
         </p>
-        <DialogActions onClose={onClose} busy={busy} disabled={Boolean(keyError || projectError)} />
+        <DialogActions onClose={onClose} busy={busy || projectBusy} disabled={Boolean(keyError || projectError || addingProject)} />
       </form>
     </Modal>
   )
 }
 
-function MachinesPage({ notify }: { notify: (text: string, error?: boolean) => void }) {
+function MachinesPage({ notify, onCreate, refreshKey }: CreationPageProps) {
   const { t } = useI18n()
   const [items, setItems] = useState<MachineAccount[]>([])
   const [query, setQuery] = useState("")
   const [loading, setLoading] = useState(true)
-  const [creating, setCreating] = useState(false)
-  const [issued, setIssued] = useState<IssuedMachineAccount | null>(null)
   const [accessItem, setAccessItem] = useState<MachineAccount | null>(null)
   const [operationsItem, setOperationsItem] = useState<MachineAccount | null>(null)
   const [deleting, setDeleting] = useState<MachineAccount | null>(null)
@@ -1088,14 +1755,8 @@ function MachinesPage({ notify }: { notify: (text: string, error?: boolean) => v
   )
   useEffect(() => {
     void load()
-  }, [load])
+  }, [load, refreshKey])
   const filtered = items.filter((item) => `${item.name} ${item.clientId}`.toLowerCase().includes(query.trim().toLowerCase()))
-  async function create(name: string) {
-    const value = await api.createMachine(name)
-    setCreating(false)
-    setIssued(value)
-    await load()
-  }
   async function toggle(item: MachineAccount) {
     try {
       await api.setMachineRevoked(item.id, !item.revokedAt)
@@ -1125,7 +1786,7 @@ function MachinesPage({ notify }: { notify: (text: string, error?: boolean) => v
         title={t("machines")}
         action={
           <span id="tour-new-machine">
-            <Button variant="primary" icon={<Plus />} label={t("newMachineAccount")} onClick={() => setCreating(true)} />
+            <Button variant="primary" icon={<Plus />} label={t("newMachineAccount")} onClick={() => onCreate("machine")} />
           </span>
         }
       />
@@ -1134,7 +1795,7 @@ function MachinesPage({ notify }: { notify: (text: string, error?: boolean) => v
       ) : (
         <>
           <ListToolbar query={query} onQuery={setQuery} resultCount={filtered.length} totalCount={items.length} />
-          <DataPanel empty={!filtered.length} emptyTitle={query ? t("noResultsTitle") : undefined} emptyDescription={query ? t("noResultsDescription") : undefined} onEmptyAction={!query ? () => setCreating(true) : undefined}>
+          <DataPanel empty={!filtered.length} emptyTitle={query ? t("noResultsTitle") : undefined} emptyDescription={query ? t("noResultsDescription") : undefined} onEmptyAction={!query ? () => onCreate("machine") : undefined}>
             <table>
               <thead>
                 <tr>
@@ -1181,8 +1842,6 @@ function MachinesPage({ notify }: { notify: (text: string, error?: boolean) => v
           </DataPanel>
         </>
       )}
-      {creating && <NameDialog title={t("newMachineAccount")} label={t("machineName")} onClose={() => setCreating(false)} onSave={create} />}
-      {issued && <TokenDialog item={issued} onClose={() => setIssued(null)} notify={notify} />}
       {accessItem && (
         <ResourceAccessDialog
           resource={{
@@ -1200,7 +1859,7 @@ function MachinesPage({ notify }: { notify: (text: string, error?: boolean) => v
   )
 }
 
-function TokenDialog({ item, onClose, notify }: { item: IssuedMachineAccount | IssuedMachineAccessToken; onClose: () => void; notify: (text: string) => void }) {
+function TokenDialog({ item, onClose, onConfigureAccess, notify }: { item: IssuedMachineAccount | IssuedMachineAccessToken; onClose: () => void; onConfigureAccess?: () => void; notify: (text: string) => void }) {
   const { t } = useI18n()
   async function copy() {
     await navigator.clipboard.writeText(item.accessToken)
@@ -1209,11 +1868,13 @@ function TokenDialog({ item, onClose, notify }: { item: IssuedMachineAccount | I
   return (
     <Modal title={t("accessToken")} onClose={onClose} wide>
       <Banner status="warning" title={t("tokenOneTime")} />
+      {onConfigureAccess && <p className="field-hint">{t("machineNextStep")}</p>}
       <div className="token-box">
         <code>{item.accessToken}</code>
         <IconButton variant="ghost" label={t("copy")} icon={<Copy />} onClick={() => void copy()} />
       </div>
       <div className="dialog-actions">
+        {onConfigureAccess && <Button variant="secondary" icon={<ShieldCheck />} label={t("configureAccess")} onClick={onConfigureAccess} />}
         <Button variant="primary" label={t("close")} onClick={onClose} />
       </div>
     </Modal>
@@ -1437,13 +2098,15 @@ function CreateAccessTokenDialog({ onClose, onSave }: { onClose: () => void; onS
   )
 }
 
-function UsersPage({ currentUser, notify }: { currentUser: User; notify: (text: string, error?: boolean) => void }) {
+function UsersPage({ currentUser, notify, onCreate, refreshKey }: CreationPageProps & { currentUser: User }) {
   const { t } = useI18n()
   const [items, setItems] = useState<User[]>([])
   const [query, setQuery] = useState("")
   const [loading, setLoading] = useState(true)
-  const [editing, setEditing] = useState<User | "new" | null>(null)
+  const [editing, setEditing] = useState<User | null>(null)
   const [passwordUser, setPasswordUser] = useState<User | null>(null)
+  const [resetUser, setResetUser] = useState<User | null>(null)
+  const [resetting, setResetting] = useState(false)
   const load = useCallback(
     () =>
       api
@@ -1455,17 +2118,10 @@ function UsersPage({ currentUser, notify }: { currentUser: User; notify: (text: 
   )
   useEffect(() => {
     void load()
-  }, [load])
+  }, [load, refreshKey])
   const filtered = items.filter((item) => `${item.displayName} ${item.username} ${item.role} ${item.disabled ? "disabled" : "active"}`.toLowerCase().includes(query.trim().toLowerCase()))
   async function save(input: { username: string; displayName: string; role: Role; password: string; disabled: boolean }) {
-    if (editing === "new")
-      await api.createUser({
-        username: input.username,
-        displayName: input.displayName,
-        role: input.role,
-        password: input.password,
-      })
-    else if (editing)
+    if (editing)
       await api.updateUser(editing.id, {
         displayName: input.displayName,
         role: input.role,
@@ -1481,6 +2137,20 @@ function UsersPage({ currentUser, notify }: { currentUser: User; notify: (text: 
     setPasswordUser(null)
     notify(t("passwordResetComplete"))
   }
+  async function resetTwoFactor() {
+    if (!resetUser || resetting) return
+    setResetting(true)
+    try {
+      await api.resetUserTwoFactor(resetUser.id)
+      notify(t("twoFactorResetComplete"))
+      setResetUser(null)
+      await load()
+    } catch (caught) {
+      notify(apiErrorText(caught, t), true)
+    } finally {
+      setResetting(false)
+    }
+  }
   return (
     <div className="page">
       <PageHeader
@@ -1488,7 +2158,7 @@ function UsersPage({ currentUser, notify }: { currentUser: User; notify: (text: 
         description={t("usersIntro")}
         action={
           <span id="tour-new-user">
-            <Button variant="primary" icon={<Plus />} label={t("newUser")} onClick={() => setEditing("new")} />
+            <Button variant="primary" icon={<Plus />} label={t("newUser")} onClick={() => onCreate("user")} />
           </span>
         }
       />
@@ -1497,7 +2167,7 @@ function UsersPage({ currentUser, notify }: { currentUser: User; notify: (text: 
       ) : (
         <>
           <ListToolbar query={query} onQuery={setQuery} resultCount={filtered.length} totalCount={items.length} />
-          <DataPanel empty={!filtered.length} emptyIcon={<UsersRound />} emptyTitle={query ? t("noResultsTitle") : t("emptyUsersTitle")} emptyDescription={query ? t("noResultsDescription") : t("emptyUsersText")} emptyActionLabel={t("newUser")} onEmptyAction={!query ? () => setEditing("new") : undefined}>
+          <DataPanel empty={!filtered.length} emptyIcon={<UsersRound />} emptyTitle={query ? t("noResultsTitle") : t("emptyUsersTitle")} emptyDescription={query ? t("noResultsDescription") : t("emptyUsersText")} emptyActionLabel={t("newUser")} onEmptyAction={!query ? () => onCreate("user") : undefined}>
             <table>
               <thead>
                 <tr>
@@ -1505,6 +2175,7 @@ function UsersPage({ currentUser, notify }: { currentUser: User; notify: (text: 
                   <th>{t("username")}</th>
                   <th>{t("role")}</th>
                   <th>{t("lastUsed")}</th>
+                  <th>{t("twoFactor")}</th>
                   <th>{t("status")}</th>
                   <th className="action-column">{t("actions")}</th>
                 </tr>
@@ -1524,6 +2195,7 @@ function UsersPage({ currentUser, notify }: { currentUser: User; notify: (text: 
                     <td>{item.username}</td>
                     <td>{item.role === "admin" ? t("administrator") : t("member")}</td>
                     <td>{item.lastLoginAt ? formatDate(item.lastLoginAt) : t("never")}</td>
+                    <td>{t(item.twoFactorEnabled ? "twoFactorOn" : "twoFactorOff")}</td>
                     <td>
                       <StatusPill value={item.disabled ? "disabled" : "active"} />
                     </td>
@@ -1531,6 +2203,7 @@ function UsersPage({ currentUser, notify }: { currentUser: User; notify: (text: 
                       <RowActions>
                         <IconButton variant="ghost" label={t("edit")} icon={<UserCog />} onClick={() => setEditing(item)} />
                         <Button size="sm" variant="ghost" label={t("resetPassword")} onClick={() => setPasswordUser(item)} />
+                        {item.twoFactorEnabled && item.id !== currentUser.id && <Button size="sm" variant="ghost" label={t("resetTwoFactor")} onClick={() => setResetUser(item)} />}
                       </RowActions>
                     </td>
                   </tr>
@@ -1540,7 +2213,8 @@ function UsersPage({ currentUser, notify }: { currentUser: User; notify: (text: 
           </DataPanel>
         </>
       )}
-      {editing && <UserDialog item={editing === "new" ? null : editing} currentUser={currentUser} onClose={() => setEditing(null)} onSave={save} />}
+      {editing && <UserDialog item={editing} currentUser={currentUser} onClose={() => setEditing(null)} onSave={save} />}
+      {resetUser && <ConfirmActionDialog title={`${t("resetTwoFactor")} · ${resetUser.displayName}`} description={t("confirmResetTwoFactor")} actionLabel={t("resetTwoFactor")} busy={resetting} onAction={() => void resetTwoFactor()} onClose={() => setResetUser(null)} />}
       {passwordUser && <NameDialog title={t("resetPassword")} label={t("newPassword")} type="password" onClose={() => setPasswordUser(null)} onSave={password} />}
     </div>
   )
@@ -1587,7 +2261,7 @@ function UserDialog({ item, currentUser, onClose, onSave }: { item: User | null;
     }
   }
   return (
-    <Modal title={t(item ? "editUser" : "newUser")} onClose={onClose}>
+    <Modal title={t(item ? "editUser" : "newUser")} onClose={onClose} busy={busy}>
       <form className="form-stack" onSubmit={submit} noValidate>
         {formError && <Banner status="error" title={formError} />}
         <Field label={t("username")} value={username} onChange={setUsername} onBlur={() => setTouched((value) => ({ ...value, username: true }))} disabled={Boolean(item)} autoComplete="username" autoFocus required hint={t("nameRequirement")} error={touched.username ? usernameError : undefined} />
@@ -1611,13 +2285,13 @@ function UserDialog({ item, currentUser, onClose, onSave }: { item: User | null;
   )
 }
 
-function GroupsPage({ notify, onNavigate }: { notify: (text: string, error?: boolean) => void; onNavigate: (page: Page) => void }) {
+function GroupsPage({ notify, onCreate, refreshKey }: CreationPageProps) {
   const { t } = useI18n()
   const [groups, setGroups] = useState<Group[]>([])
   const [users, setUsers] = useState<User[]>([])
   const [query, setQuery] = useState("")
   const [loading, setLoading] = useState(true)
-  const [editing, setEditing] = useState<Group | "new" | null>(null)
+  const [editing, setEditing] = useState<Group | null>(null)
   const [membersGroup, setMembersGroup] = useState<Group | null>(null)
   const [deleting, setDeleting] = useState<Group | null>(null)
   const [deleteBusy, setDeleteBusy] = useState(false)
@@ -1634,9 +2308,9 @@ function GroupsPage({ notify, onNavigate }: { notify: (text: string, error?: boo
   )
   useEffect(() => {
     void load()
-  }, [load])
+  }, [load, refreshKey])
   async function save(name: string) {
-    editing === "new" ? await api.createGroup(name) : editing && (await api.updateGroup(editing.id, name))
+    if (editing) await api.updateGroup(editing.id, name)
     setEditing(null)
     notify(t("changesSaved"))
     await load()
@@ -1664,10 +2338,10 @@ function GroupsPage({ notify, onNavigate }: { notify: (text: string, error?: boo
   }
   const needsMoreUsers = users.length <= 1 && groups.length === 0
   const filtered = groups.filter((group) => group.name.toLowerCase().includes(query.trim().toLowerCase()))
-  const emptyAction = needsMoreUsers ? () => onNavigate("users") : () => setEditing("new")
+  const emptyAction = needsMoreUsers ? () => onCreate("user") : () => onCreate("group")
   return (
     <div className="page">
-      <PageHeader title={t("groups")} description={t("groupsIntro")} action={loading ? undefined : needsMoreUsers ? <Button variant="primary" icon={<Plus />} label={t("newUser")} onClick={() => onNavigate("users")} /> : <Button variant="primary" icon={<Plus />} label={t("newGroup")} onClick={() => setEditing("new")} />} />
+      <PageHeader title={t("groups")} description={t("groupsIntro")} action={loading ? undefined : needsMoreUsers ? <Button variant="primary" icon={<Plus />} label={t("newUser")} onClick={() => onCreate("user")} /> : <Button variant="primary" icon={<Plus />} label={t("newGroup")} onClick={() => onCreate("group")} />} />
       {loading ? (
         <PageSkeleton />
       ) : (
@@ -1710,7 +2384,7 @@ function GroupsPage({ notify, onNavigate }: { notify: (text: string, error?: boo
           </DataPanel>
         </>
       )}
-      {editing && <NameDialog title={t(editing === "new" ? "newGroup" : "editGroup")} label={t("groupName")} initialValue={editing === "new" ? "" : editing.name} onClose={() => setEditing(null)} onSave={save} />}
+      {editing && <NameDialog title={t("editGroup")} label={t("groupName")} initialValue={editing.name} onClose={() => setEditing(null)} onSave={save} />}
       {membersGroup && <GroupMembersDialog group={membersGroup} users={users} onClose={() => setMembersGroup(null)} onSave={saveMembers} />}
       {deleting && <ConfirmActionDialog title={t("deleteGroupTitle")} description={`${deleting.name} · ${t("confirmDeleteGroup")}`} actionLabel={t("delete")} busy={deleteBusy} onAction={() => void remove()} onClose={() => setDeleting(null)} />}
     </div>
@@ -1736,7 +2410,7 @@ function GroupMembersDialog({ group, users, onClose, onSave }: { group: Group; u
     }
   }
   return (
-    <Modal title={`${t("manageMembers")} · ${group.name}`} onClose={onClose} wide>
+    <Modal title={`${t("manageMembers")} · ${group.name}`} onClose={onClose} busy={busy} wide>
       <form className="form-stack" onSubmit={submit}>
         {formError && <Banner status="error" title={formError} />}
         <div className="member-picker">
@@ -3173,7 +3847,7 @@ async function readMasterKey(file: File | null) {
   return file ? (await file.text()).trim() : ""
 }
 
-function SettingsPage() {
+function SettingsPage({ notify }: { notify: (text: string, error?: boolean) => void }) {
   const { locale, setLocale, t } = useI18n()
   const { mode, setMode } = useTheme()
   const modes: Array<{ value: ThemeMode; icon: ReactNode; label: MessageKey }> = [
@@ -3194,6 +3868,7 @@ function SettingsPage() {
     <div className="page">
       <PageHeader title={t("settings")} description={t("appearanceText")} />
       <section className="settings-stack">
+        <SecurityPanel notify={notify} />
         <article className="panel settings-panel">
           <div>
             <p className="eyebrow">ASTRYX</p>
@@ -3308,13 +3983,14 @@ function DataPanel({ empty, emptyIcon, emptyTitle, emptyDescription, emptyAction
   )
 }
 
-function Modal({ title, onClose, wide = false, children }: { title: string; onClose: () => void; wide?: boolean; children: ReactNode }) {
+function Modal({ title, onClose, wide = false, busy = false, children }: { title: string; onClose: () => void; wide?: boolean; busy?: boolean; children: ReactNode }) {
   const backdrop = useRef<HTMLDivElement>(null)
   const dialog = useRef<HTMLElement>(null)
   const onCloseRef = useRef(onClose)
   const previousFocus = useRef<HTMLElement | null>(document.activeElement instanceof HTMLElement ? document.activeElement : null)
   const titleId = useId()
-  onCloseRef.current = onClose
+  useScrollLock(true)
+  onCloseRef.current = busy ? () => undefined : onClose
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
       const node = dialog.current
@@ -3338,7 +4014,11 @@ function Modal({ title, onClose, wide = false, children }: { title: string; onCl
       if (!elements.length) return
       const first = elements[0]
       const last = elements[elements.length - 1]
-      if (event.shiftKey && document.activeElement === first) {
+      if (!dialog.current.contains(document.activeElement)) {
+        event.preventDefault()
+        const target = event.shiftKey ? last : first
+        target.focus()
+      } else if (event.shiftKey && document.activeElement === first) {
         event.preventDefault()
         last.focus()
       } else if (!event.shiftKey && document.activeElement === last) {
@@ -3360,13 +4040,13 @@ function Modal({ title, onClose, wide = false, children }: { title: string; onCl
       className="modal-backdrop"
       role="presentation"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose()
+        if (event.target === event.currentTarget && !busy) onClose()
       }}
     >
-      <section ref={dialog} className="modal" data-wide={wide} role="dialog" aria-modal="true" aria-labelledby={titleId}>
+      <section ref={dialog} className="modal" data-wide={wide} role="dialog" aria-modal="true" aria-busy={busy || undefined} aria-labelledby={titleId}>
         <header>
           <h2 id={titleId}>{title}</h2>
-          <IconButton variant="ghost" label={t("close")} icon={<X />} onClick={onClose} />
+          <IconButton variant="ghost" label={t("close")} icon={<X />} isDisabled={busy} onClick={onClose} />
         </header>
         {children}
       </section>
@@ -3407,7 +4087,7 @@ function NameDialog({ title, label, type = "text", initialValue = "", onClose, o
     }
   }
   return (
-    <Modal title={title} onClose={onClose}>
+    <Modal title={title} onClose={onClose} busy={busy}>
       <form className="form-stack" onSubmit={submit} noValidate>
         {formError && <Banner status="error" title={formError} />}
         <Field label={label} value={value} onChange={setValue} onBlur={() => setTouched(true)} type={type} autoComplete={type === "password" ? "new-password" : undefined} autoFocus required hint={type === "password" ? t("passwordRequirement") : t("nameRequirement")} error={touched ? error : undefined} />
@@ -3570,6 +4250,8 @@ function passphraseValidation(value: string, t: (key: MessageKey) => string) {
 
 function apiErrorText(error: unknown, t: (key: MessageKey) => string) {
   if (error instanceof ApiError) {
+    if (error.code === "INVALID_CREDENTIALS") return t("incorrectCredentials")
+    if (error.status === 429) return t("tooManyAttempts")
     if (error.status === 409) return t("conflictError")
     if (error.status === 422) return t("validationError")
     if (error.status === 401 || error.status === 403) return t("permissionError")

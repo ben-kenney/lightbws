@@ -6,8 +6,10 @@ pub mod crypto;
 pub mod db;
 pub mod domain;
 pub mod error;
+pub mod rate_limit;
 pub mod sdk_crypto;
 pub mod sdk_models;
+pub mod totp;
 pub mod web;
 
 use std::{
@@ -29,7 +31,13 @@ use tower_http::{
 };
 
 use crate::crypto::MasterKey;
+use crate::domain::two_factor::{TwoFactorPolicy, TwoFactorRepository};
+use crate::rate_limit::RateLimiter;
 use crate::{config::Config, db::Database};
+
+/// Wrong second-factor codes, or wrong passwords on a signed-in confirmation, allowed per
+/// address or user each minute.
+const SECOND_FACTOR_FAILURES_PER_MINUTE: usize = 30;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -40,6 +48,8 @@ pub struct AppState {
     pub master_key: MasterKey,
     pub allow_plaintext_backups: bool,
     pub(crate) ip_header: Option<HeaderName>,
+    pub require_2fa: TwoFactorPolicy,
+    pub(crate) second_factor_failures: RateLimiter,
 }
 
 impl AppState {
@@ -52,7 +62,17 @@ impl AppState {
             master_key: MasterKey::random().expect("operating system random source"),
             allow_plaintext_backups: config.allow_plaintext_backups,
             ip_header: config.ip_header.clone(),
+            require_2fa: config.require_2fa,
+            second_factor_failures: RateLimiter::new(
+                SECOND_FACTOR_FAILURES_PER_MINUTE,
+                std::time::Duration::from_secs(60),
+                4096,
+            ),
         }
+    }
+
+    pub fn two_factor(&self) -> TwoFactorRepository {
+        TwoFactorRepository::new(self.db.clone(), self.master_key.clone())
     }
 
     pub fn with_master_key(mut self, master_key: MasterKey) -> Self {

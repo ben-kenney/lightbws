@@ -19,6 +19,7 @@ use crate::{
             machine_account, machine_group_grant, machine_session, machine_user_grant, project,
             project_group_grant, project_machine_grant, project_user_grant, secret,
             secret_group_grant, secret_machine_grant, secret_user_grant, secret_version, user,
+            user_recovery_code,
         },
     },
     domain::{
@@ -30,6 +31,7 @@ use crate::{
         },
         next_sdk_revision,
         secret_history::{SecretContent, prune, record_replaced},
+        two_factor::{ExportedTotp, TwoFactorRepository},
     },
     error::AppError,
     sdk_crypto::{OrganizationKey, legacy},
@@ -146,6 +148,14 @@ struct DatabaseDumpV3 {
     secret_versions: Option<Vec<SecretVersionRecord>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     users: Option<Vec<user::Model>>,
+    /// Confirmed TOTP secrets, part of the identities scope. They are stored under the source
+    /// master key, which the destination does not have, so the archive carries them decrypted
+    /// (inside its own encryption) the same way it carries backup target credentials. Archives
+    /// written before two-factor sign-in existed omit both sections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    user_totp: Option<Vec<UserTotpRecord>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    user_recovery_codes: Option<Vec<user_recovery_code::Model>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     groups: Option<Vec<group::Model>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -227,6 +237,17 @@ struct SecretRecord {
     created_at: i64,
     updated_at: i64,
     revision_nanos: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UserTotpRecord {
+    user_id: String,
+    /// Base32, as an authenticator app would hold it.
+    secret: String,
+    confirmed_at: i64,
+    last_used_step: Option<i64>,
+    created_at: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -319,6 +340,26 @@ pub async fn dump_database_scoped(
     let secret_versions =
         export_secret_versions(&transaction, db.organization_key(), &transport).await?;
     let users = optional_models::<user::Entity>(&transaction, scopes.identities).await?;
+    let user_totp = if scopes.identities {
+        Some(
+            TwoFactorRepository::new(db.clone(), master_key.clone())
+                .export_totp(&transaction)
+                .await?
+                .into_iter()
+                .map(|record| UserTotpRecord {
+                    user_id: record.user_id,
+                    secret: record.secret,
+                    confirmed_at: record.confirmed_at,
+                    last_used_step: record.last_used_step,
+                    created_at: record.created_at,
+                })
+                .collect(),
+        )
+    } else {
+        None
+    };
+    let user_recovery_codes =
+        optional_models::<user_recovery_code::Entity>(&transaction, scopes.identities).await?;
     let groups = optional_models::<group::Entity>(&transaction, scopes.identities).await?;
     let group_members =
         optional_models::<group_member::Entity>(&transaction, scopes.identities).await?;
@@ -399,6 +440,8 @@ pub async fn dump_database_scoped(
         secrets,
         secret_versions: Some(secret_versions),
         users,
+        user_totp,
+        user_recovery_codes,
         groups,
         group_members,
         machine_accounts,
@@ -586,6 +629,7 @@ pub async fn import_database_scoped(
         validate_secret_record(record)?;
     }
     validate_secret_versions(&dump)?;
+    validate_second_factors(&dump)?;
     let project_count = dump.projects.len();
     let secret_count = dump.secrets.len();
     let mut dump = dump;
@@ -638,6 +682,7 @@ pub async fn import_database_scoped(
     }
     if scopes.identities {
         connection_delete(&transaction, "DELETE FROM sessions").await?;
+        connection_delete(&transaction, "DELETE FROM login_challenges").await?;
     }
     if !imported_token_ids.is_empty() {
         machine_session::Entity::delete_many()
@@ -647,6 +692,36 @@ pub async fn import_database_scoped(
     }
 
     upsert_models::<user::ActiveModel, _>(&transaction, dump.users.unwrap_or_default()).await?;
+    let two_factor = TwoFactorRepository::new(db.clone(), master_key.clone());
+    for record in dump.user_totp.unwrap_or_default() {
+        // Re-encrypted under this instance's master key; the user keeps the same authenticator.
+        upsert_model(
+            &transaction,
+            two_factor.import_totp(ExportedTotp {
+                user_id: record.user_id,
+                secret: record.secret,
+                confirmed_at: record.confirmed_at,
+                last_used_step: record.last_used_step,
+                created_at: record.created_at,
+            })?,
+        )
+        .await?;
+    }
+    let recovery_codes = dump.user_recovery_codes.unwrap_or_default();
+    // An archived set replaces the destination's set for that user, like regenerating does.
+    let recovery_code_users = recovery_codes
+        .iter()
+        .map(|code| code.user_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    if !recovery_code_users.is_empty() {
+        user_recovery_code::Entity::delete_many()
+            .filter(user_recovery_code::Column::UserId.is_in(recovery_code_users))
+            .exec(&transaction)
+            .await?;
+    }
+    for code in recovery_codes {
+        code.into_active_model().insert(&transaction).await?;
+    }
     for record in dump.projects {
         upsert_model(
             &transaction,
@@ -1145,6 +1220,9 @@ fn validate_v3_sections(dump: &DatabaseDumpV3) -> Result<(), AppError> {
     let valid = dump.users.is_some() == dump.scopes.identities
         && dump.groups.is_some() == dump.scopes.identities
         && dump.group_members.is_some() == dump.scopes.identities
+        // Optional within the identities scope: older archives do not have them.
+        && (dump.user_totp.is_none() || dump.scopes.identities)
+        && (dump.user_recovery_codes.is_none() || dump.scopes.identities)
         && dump.machine_accounts.is_some() == dump.scopes.machine_accounts
         && dump.machine_access_tokens.is_some() == dump.scopes.machine_accounts
         && dump.project_user_grants.is_some() == dump.scopes.access_policies
@@ -1161,6 +1239,44 @@ fn validate_v3_sections(dump: &DatabaseDumpV3) -> Result<(), AppError> {
     valid
         .then_some(())
         .ok_or_else(|| AppError::Validation("backup sections do not match declared scopes".into()))
+}
+
+fn validate_second_factors(dump: &DatabaseDumpV3) -> Result<(), AppError> {
+    let invalid = || AppError::Validation("invalid two-factor record".into());
+    let user_ids = dump
+        .users
+        .iter()
+        .flatten()
+        .map(|user| user.id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let mut enrolled = std::collections::HashSet::new();
+    for record in dump.user_totp.iter().flatten() {
+        if !user_ids.contains(record.user_id.as_str()) || !enrolled.insert(record.user_id.as_str())
+        {
+            return Err(invalid());
+        }
+    }
+    let mut ids = std::collections::HashSet::new();
+    let mut digests = std::collections::HashSet::new();
+    for code in dump.user_recovery_codes.iter().flatten() {
+        if uuid::Uuid::parse_str(&code.id).is_err()
+            || !user_ids.contains(code.user_id.as_str())
+            || code.code_digest.len() != 64
+            || !code
+                .code_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            || code.created_at < 0
+            || code
+                .used_at
+                .is_some_and(|used_at| used_at < code.created_at)
+            || !ids.insert(code.id.as_str())
+            || !digests.insert((code.user_id.as_str(), code.code_digest.as_str()))
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(())
 }
 
 fn validate_secret_versions(dump: &DatabaseDumpV3) -> Result<(), AppError> {
@@ -1235,6 +1351,9 @@ async fn clear_full_instance(connection: &impl ConnectionTrait) -> Result<(), Ap
             DELETE FROM group_members;
             DELETE FROM groups;
             DELETE FROM sessions;
+            DELETE FROM login_challenges;
+            DELETE FROM user_recovery_codes;
+            DELETE FROM user_totp;
             DELETE FROM secret_versions;
             DELETE FROM secrets;
             DELETE FROM projects;

@@ -22,6 +22,10 @@ A password-manager workflow looks like: browser → open a website → autofill 
 
 Use LightBWS for workloads such as injecting a database URL into a service, supplying an API token to GitHub Actions, or managing deployment credentials for a homelab. It is not a replacement for Bitwarden Password Manager: LightBWS does not provide a personal vault, browser autofill, passkey management, family password sharing, or breach monitoring. The two products are complementary. Password Manager protects credentials used by people, while Secrets Manager delivers credentials to software and automation.
 
+## Creation workflow
+
+Use **Create new** in navigation to create a secret, project, machine account, user, or group without searching through separate pages. Contextual **New** buttons open the same workflow. After creating a project, continue directly to adding a secret or configuring access; a secret form can also create and select a project without losing its draft. Open a project to filter its secrets and share the scoped URL. Administrators can still create secrets without a project.
+
 ## Screenshots
 
 ![LightBWS login](screenshoot/login-en.png)
@@ -44,6 +48,7 @@ Use LightBWS for workloads such as injecting a database URL into a service, supp
 - Project and direct-secret grants for users, groups, and machine accounts with read or read/write access.
 - Projects, secrets, machine accounts, soft-delete trash, and one-time access-token display.
 - Bounded per-secret version history, so an accidental edit from the Web UI or an SDK client can be reviewed and undone.
+- Optional two-factor sign-in for the Web UI with any authenticator app (TOTP) and one-time recovery codes, with a setting to require it.
 - Audit collection controls with automatic retention cleanup, manual clearing, and a full off switch.
 - Cookie sessions, CSRF protection, Argon2id passwords, encrypted backup credentials, and hardened response headers.
 - Chinese and English UI with seven built-in Astryx themes and system, light, and dark color modes.
@@ -88,7 +93,7 @@ docker compose pull
 docker compose up -d
 ```
 
-Set `LIGHTBWS_IMAGE=ghcr.io/ca-x/lightbws:0.2.6` in `.env` when a deployment must remain pinned to a specific release. Running `docker compose down` keeps the data volume; `docker compose down -v` permanently deletes it.
+Set `LIGHTBWS_IMAGE=ghcr.io/ca-x/lightbws:0.2.7` in `.env` when a deployment must remain pinned to a specific release. Running `docker compose down` keeps the data volume; `docker compose down -v` permanently deletes it.
 
 ### Release binary
 
@@ -129,6 +134,8 @@ The remaining values are passed into the LightBWS container:
 | `LIGHTBWS_IP_HEADER` | none | Header that carries the client address behind a reverse proxy, such as `X-Real-IP`. Used for failed-login logs and the login rate limit. Only set it when every request comes through that proxy. See [fail2ban](docs/fail2ban.md). |
 | `LIGHTBWS_LOG_FILE` | none | Also append plain-text logs to this file, for example for fail2ban. |
 | `LIGHTBWS_SECRET_HISTORY_LIMIT` | `20` | Earlier versions kept per secret, from `0` to `1000`. `0` stops recording new versions without deleting existing history. See [Secret version history](#secret-version-history). |
+| `LIGHTBWS_REQUIRE_2FA` | `off` | Who must use two-factor sign-in for the Web UI: `off` (each user chooses), `admins`, or `all`. See [Two-factor sign-in](#two-factor-sign-in). |
+| `LIGHTBWS_RESET_2FA_FOR` | none | Username whose second factor is removed at startup. For an administrator who is locked out; unset it after one start. |
 | `RUST_LOG` | `lightbws=info,tower_http=info` | Structured log filter. |
 
 The image already sets `LIGHTBWS_BIND=0.0.0.0:8080` and `LIGHTBWS_DATA_DIR=/data`. Native binary deployments can override both runtime variables; Compose normally changes the host mapping through `LIGHTBWS_LISTEN_ADDRESS` and `LIGHTBWS_PORT` instead.
@@ -170,9 +177,9 @@ Store the copy somewhere other than the database backups, such as a password man
 
 What this protects: leaked database files, volume snapshots, data-directory backups and container exports. What it does not protect: a compromised running host. The server holds the key in memory to serve plaintext to the Web UI, so anyone who controls the running process or can read the keyfile can read every Secret. Volume or disk encryption (LUKS, ZFS native encryption) is still worthwhile alongside it.
 
-### Upgrading from 0.2.6 or earlier
+### Upgrading from 0.2.7 or earlier
 
-Releases up to 0.2.6 encrypted every installation's data under one key derived from constants published in this repository, so the encrypted columns offered no protection against anyone holding a copy of the database. There are two ways to move that data under a per-instance key. Either way:
+Releases up to 0.2.7 encrypted every installation's data under one key derived from constants published in this repository, so the encrypted columns offered no protection against anyone holding a copy of the database. There are two ways to move that data under a per-instance key. Either way:
 
 - Every machine access token from the old installation is revoked. Mint new tokens in the Web UI and update the clients that use them.
 - `LIGHTBWS_ENABLE_UPSTREAM_COMPATIBILITY_ACCOUNT` has been removed, because its fixed public credentials could only work by exposing the organization key. LightBWS refuses to start while it is set to `true`.
@@ -191,7 +198,7 @@ The old release cannot read the database after this. Rolling back means restorin
 
 This leaves the old installation untouched until you retire it.
 
-1. On the 0.2.6 installation, open **Import & export**, choose **Full instance** as the scope, set a passphrase and download the encrypted export. The default scope carries only projects and Secrets; Full instance also carries users, groups, machine accounts, access policies, audit data and backup targets.
+1. On the 0.2.7 installation, open **Import & export**, choose **Full instance** as the scope, set a passphrase and download the encrypted export. The default scope carries only projects and Secrets; Full instance also carries users, groups, machine accounts, access policies, audit data and backup targets.
 2. Install the new release with its own data directory and keyfile volume, as in [Quick start](#quick-start), and back up its keyfile.
 3. On the new installation, open **Import & export**, choose the archive and enter the passphrase. To make the new installation an exact copy of the old one, select **Replace current durable data**; this replaces the users created at install time and signs everyone out, so sign in with an account from the old installation.
 4. LightBWS re-encrypts the imported project names and Secrets from the published key under the new organization key. Open a few Secrets in the Web UI to confirm they read correctly.
@@ -221,6 +228,20 @@ Changing a secret's key, value, or note keeps the content that was replaced. Thi
 - History is stored exactly like current secrets, encrypted under the organization key, and travels with secrets in backups and exports.
 
 History contains old secret values. Rotating a leaked secret does not remove the leaked value from history until it ages out or an administrator clears that secret's history.
+
+## Two-factor sign-in
+
+Web UI users can add a second step to sign-in with any authenticator app that supports time-based codes (TOTP), such as Aegis, 2FAS, Google Authenticator, or a password manager. Machine accounts and SDK access tokens are not affected.
+
+- Each user turns it on under **Settings → Security**: confirm the password, scan the QR code (or type the setup key), and enter one code. The QR code is drawn in the browser; nothing is sent to an outside service.
+- Setup shows ten recovery codes once. Each signs in once in place of an authenticator code. Generating new codes replaces the old ones.
+- Turning it off, generating new recovery codes, and changing your own password all ask for the password and a current code. Turning it on, or changing the password, signs out the user's other sessions.
+- `LIGHTBWS_REQUIRE_2FA=admins` or `all` makes it mandatory. A user it applies to who has not set it up can sign in but is held at the setup screen until they do, and cannot turn it off afterwards.
+- An administrator can reset another user's second factor on the **Users** page. The user is signed out and signs in with the password alone. If the only administrator is locked out, start LightBWS once with `LIGHTBWS_RESET_2FA_FOR=<username>`, then remove the variable.
+- A code works once, a sign-in attempt allows five wrong codes and expires after five minutes, and wrong codes are rate limited per address. Failures are logged with `reason=invalid_second_factor` in the format that [fail2ban](docs/fail2ban.md) reads.
+- Authenticator secrets are encrypted with the instance master key and recovery codes are stored as hashes. Both travel with the users scope of an export or backup, so a restored instance keeps everyone's second factor. Protect such archives accordingly.
+
+Every change is written to the audit log (`user.2fa.enable`, `user.2fa.disable`, `user.2fa.reset`, `user.2fa.recovery_code.used`, `user.2fa.recovery_codes.regenerate`, `user.password.change`).
 
 ## Audit log
 
@@ -289,7 +310,7 @@ The authorization acceptance test uses the same `fnox.toml` throughout:
 - The default backup scope contains projects and secrets (with their version history) only. Optional scopes add users/groups/memberships, machine accounts, access policies, audit settings/events, and backup target configuration/credentials. The full-instance preset includes every persistent scope and can rebuild the durable database.
 - Sessions, machine sessions, backup-job history, migration metadata, SQLite WAL state, and `master.key` are never included in an archive.
 - Manual encrypted exports use an independent passphrase-derived Argon2id key and are portable between LightBWS installations. Import them with the same passphrase.
-- The organization keyfile is never included in an archive. Archives re-encrypt project names and Secrets under a one-off key stored inside the (encrypted) archive, and import re-encrypts them under the destination's organization key. Archives from 0.2.6 and earlier are re-encrypted from the published legacy key on import.
+- The organization keyfile is never included in an archive. Archives re-encrypt project names and Secrets under a one-off key stored inside the (encrypted) archive, and import re-encrypts them under the destination's organization key. Archives from 0.2.7 and earlier are re-encrypted from the published legacy key on import.
 - Machine access tokens wrap their instance's organization key. A full-instance restore keeps them usable only when the destination uses the source's keyfile; otherwise restored tokens are revoked and must be minted again.
 - Scheduled S3 and WebDAV snapshots are encrypted with the persistent instance master key. To restore one on another instance, provide the source instance's old `master.key`; it is used only to decrypt the selected archive and never replaces the destination key.
 - `master.key` is never embedded in or uploaded with a `.lightbws` archive. Back it up separately. Imported backup credentials are decrypted from the archive and re-encrypted with the destination instance's master key.
@@ -361,8 +382,18 @@ After CI succeeds on `main`, pushing a semantic `vX.Y.Z` tag starts two release 
 
 ```bash
 git push origin main
-git tag -a v0.2.6 -m "LightBWS v0.2.6"
-git push origin v0.2.6
+git tag -a v0.2.7 -m "LightBWS v0.2.7"
+git push origin v0.2.7
 ```
+
+If a hosted runner is retired after a tag is published, update the release workflow and rerun it against that existing tag without moving the tag:
+
+```bash
+gh workflow run release.yml --ref main -f tag=v0.2.7
+```
+
+The recovery run validates the tag's package versions and pins every build to its resolved source commit; archive names and the release still use the selected tag.
+
+Publication rechecks the existing tag instead of sending a historical `target_commitish`, avoiding unnecessary workflow-write permissions.
 
 The Docker workflow builds `linux/amd64` and `linux/arm64` on native GitHub runners, then publishes the same multi-platform tags to `ghcr.io/ca-x/lightbws` and `docker.io/czyt/lightbws`. Repository or organization secrets named `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` are required. Each release archive contains the binary, both language READMEs, and the license, with a companion SHA-256 checksum asset. Frontend files are already embedded in the binary.

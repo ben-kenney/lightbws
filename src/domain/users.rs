@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::{
     config::{BootstrapAdmin, validate_password, validate_username},
     db::{Database, entities::user},
-    domain::now,
+    domain::{now, two_factor},
     error::AppError,
 };
 
@@ -45,6 +45,8 @@ pub struct PublicUser {
     pub created_at: i64,
     pub updated_at: i64,
     pub last_login_at: Option<i64>,
+    /// Whether the user has a confirmed second factor for web sign-in.
+    pub two_factor_enabled: bool,
 }
 
 #[derive(Clone)]
@@ -82,12 +84,19 @@ impl UserRepository {
     }
 
     pub async fn list(&self) -> Result<Vec<PublicUser>, AppError> {
+        let enrolled = two_factor::enabled_user_ids(self.db.connection()).await?;
         user::Entity::find()
             .order_by_asc(user::Column::Username)
             .all(self.db.connection())
             .await?
             .into_iter()
-            .map(PublicUser::try_from)
+            .map(|model| {
+                let two_factor_enabled = enrolled.contains(&model.id);
+                PublicUser::try_from(model).map(|user| PublicUser {
+                    two_factor_enabled,
+                    ..user
+                })
+            })
             .collect()
     }
 
@@ -96,7 +105,22 @@ impl UserRepository {
             .one(self.db.connection())
             .await?
             .ok_or(AppError::Unauthorized)?;
-        PublicUser::try_from(model)
+        self.public(model).await
+    }
+
+    pub async fn find_model(&self, id: &str) -> Result<Option<user::Model>, AppError> {
+        Ok(user::Entity::find_by_id(id)
+            .one(self.db.connection())
+            .await?)
+    }
+
+    /// The public view of a stored user, including whether a second factor is set up.
+    async fn public(&self, model: user::Model) -> Result<PublicUser, AppError> {
+        let two_factor_enabled = two_factor::is_enabled(self.db.connection(), &model.id).await?;
+        Ok(PublicUser {
+            two_factor_enabled,
+            ..PublicUser::try_from(model)?
+        })
     }
 
     pub async fn find_login(&self, username: &str) -> Result<user::Model, AppError> {
@@ -209,7 +233,8 @@ impl UserRepository {
     pub async fn record_login(&self, model: user::Model) -> Result<PublicUser, AppError> {
         let mut active = model.into_active_model();
         active.last_login_at = Set(Some(now()));
-        PublicUser::try_from(active.update(self.db.connection()).await?)
+        let model = active.update(self.db.connection()).await?;
+        self.public(model).await
     }
 }
 
@@ -230,6 +255,7 @@ impl TryFrom<user::Model> for PublicUser {
             created_at: value.created_at,
             updated_at: value.updated_at,
             last_login_at: value.last_login_at,
+            two_factor_enabled: false,
         })
     }
 }

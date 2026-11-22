@@ -19,6 +19,12 @@ pub enum AppError {
     Csrf,
     #[error("rate limited")]
     RateLimited,
+    /// A password, code or recovery code given to confirm a sensitive change was wrong.
+    #[error("invalid credentials")]
+    InvalidCredentials,
+    /// Policy requires the signed-in user to add a second factor first.
+    #[error("two-factor enrollment required")]
+    TwoFactorEnrollmentRequired,
     #[error("validation failed")]
     Validation(String),
     #[error("internal error")]
@@ -69,6 +75,16 @@ impl IntoResponse for AppError {
                 StatusCode::TOO_MANY_REQUESTS,
                 "RATE_LIMITED",
                 "Too many requests".to_owned(),
+            ),
+            Self::InvalidCredentials => (
+                StatusCode::FORBIDDEN,
+                "INVALID_CREDENTIALS",
+                "The password or code is incorrect".to_owned(),
+            ),
+            Self::TwoFactorEnrollmentRequired => (
+                StatusCode::FORBIDDEN,
+                "TWO_FACTOR_ENROLLMENT_REQUIRED",
+                "Set up two-factor authentication to continue".to_owned(),
             ),
             Self::Validation(message) => (StatusCode::UNPROCESSABLE_ENTITY, "VALIDATION", message),
             Self::Internal(error) => {

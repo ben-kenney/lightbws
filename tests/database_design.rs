@@ -58,6 +58,7 @@ async fn schema_contains_every_record_table_and_supporting_structure() {
             "backup_targets",
             "group_members",
             "groups",
+            "login_challenges",
             "machine_access_tokens",
             "machine_accounts",
             "machine_group_grants",
@@ -75,6 +76,8 @@ async fn schema_contains_every_record_table_and_supporting_structure() {
             "secret_versions",
             "secrets",
             "sessions",
+            "user_recovery_codes",
+            "user_totp",
             "users",
         ]
     );
@@ -402,6 +405,74 @@ async fn every_table_enforces_its_storage_invariants() {
             "INSERT INTO backup_jobs (id, target_id, trigger_kind, status, object_key, created_at) VALUES ('{}', '{}', 'manual', 'succeeded', 'lightbws/invalid', 1)",
             Uuid::new_v4(),
             backup_target.id
+        ),
+    )
+    .await;
+
+    let digest = "a".repeat(64);
+    assert_rejected(
+        &db,
+        format!(
+            "INSERT INTO user_totp (user_id, secret_cipher, created_at) VALUES ('{}', '', 1)",
+            user.id
+        ),
+    )
+    .await;
+    assert_rejected(
+        &db,
+        format!(
+            "INSERT INTO user_totp (user_id, secret_cipher, created_at, confirmed_at) VALUES ('{}', 'cipher', 10, 9)",
+            user.id
+        ),
+    )
+    .await;
+    assert_rejected(
+        &db,
+        format!(
+            "INSERT INTO user_totp (user_id, secret_cipher, created_at) VALUES ('{}', 'cipher', 1)",
+            Uuid::new_v4()
+        ),
+    )
+    .await;
+    assert_rejected(
+        &db,
+        format!(
+            "INSERT INTO user_recovery_codes (id, user_id, code_digest, created_at) VALUES ('{}', '{}', 'short', 1)",
+            Uuid::new_v4(),
+            user.id
+        ),
+    )
+    .await;
+    assert_rejected(
+        &db,
+        format!(
+            "INSERT INTO user_recovery_codes (id, user_id, code_digest, created_at, used_at) VALUES ('{}', '{}', '{digest}', 10, 9)",
+            Uuid::new_v4(),
+            user.id
+        ),
+    )
+    .await;
+    assert_rejected(
+        &db,
+        format!(
+            "INSERT INTO login_challenges (id, user_id, kind, failed_attempts, created_at, expires_at) VALUES ('{digest}', '{}', 'second_factor', 0, 10, 10)",
+            user.id
+        ),
+    )
+    .await;
+    assert_rejected(
+        &db,
+        format!(
+            "INSERT INTO login_challenges (id, user_id, kind, failed_attempts, created_at, expires_at) VALUES ('{digest}', '{}', 'second_factor', -1, 10, 20)",
+            user.id
+        ),
+    )
+    .await;
+    assert_rejected(
+        &db,
+        format!(
+            "INSERT INTO login_challenges (id, user_id, kind, failed_attempts, created_at, expires_at) VALUES ('short', '{}', 'second_factor', 0, 10, 20)",
+            user.id
         ),
     )
     .await;

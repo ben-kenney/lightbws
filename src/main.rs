@@ -22,6 +22,9 @@ async fn main() -> Result<()> {
     let users = UserRepository::new(db.clone());
     users.bootstrap(config.bootstrap_admin.as_ref()).await?;
     let master_key = MasterKey::load_or_create(&config)?;
+    if let Some(username) = &config.reset_2fa_for {
+        lightbws::domain::two_factor::break_glass_reset(&db, &master_key, username).await?;
+    }
     let state = AppState::new(db, &config).with_master_key(master_key);
     lightbws::domain::backups::recover_interrupted_jobs(&state.db).await?;
     tokio::spawn(lightbws::domain::backups::scheduler(state.clone()));
